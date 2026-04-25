@@ -1,0 +1,77 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "3dmake-gui-wrapper"
+version = "0.1.0"
+description = "A NiceGUI-based GUI wrapper for tdeck/3dmake, designed for accessibility and terminal-based execution."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    {name = "Michael Hunsaker", email = "your.email@example.com"},
+]
+license = {text = "MIT"}
+keywords = ["3dmake", "nicegui", "accessibility", "gui", "3d-modeling", "blind", "screenreader"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Software Development :: User Interfaces",
+]
+
+dependencies = [
+    "nicegui>=1.4.0",
+    # pywebview is required for native desktop window mode (ui.run(native=True))
+    # and is bundled by PyInstaller.  Optional at import time but needed for
+    # the compiled .exe / binary.
+    "pywebview>=4.4.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "ruff",
+    "pytest",
+    "pytest-asyncio",
+    "pyinstaller>=6.0",
+]
+
+[project.scripts]
+# Creates a `3dmake-gui` command after `pip install` / `uv sync`
+3dmake-gui = "tdmake_gui_wrapper.app:main"
+
+[tool.uv]
+dev-dependencies = [
+    "black",
+    "ruff",
+    "pytest",
+    "pytest-asyncio",
+    "pyinstaller>=6.0",
+]
+
+[tool.hatch.build.targets.wheel]
+# NOTE: hatchling cannot handle package names starting with a digit.
+# The Python package is named `tdmake_gui_wrapper` (no leading digit).
+packages = ["src/tdmake_gui_wrapper"]
+
+[tool.black]
+line-length = 88
+target-version = ["py39"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "C4", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
