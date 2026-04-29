@@ -1,11 +1,11 @@
 # Copyright 2026 Michael Ryan Hunsaker, M.Ed., Ph.D.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -25,15 +25,25 @@ or (after installing the package):
 
 from __future__ import annotations
 
-import asyncio
+import argparse
+import base64
+import html
+import json
+import sys
 from pathlib import Path
-from typing import Optional
+from time import perf_counter
 
-from nicegui import app, ui
+from nicegui import ui
 
+from . import __version__
 from .core import (
     find_3dm_binary,
+    get_3dmake_config_dir,
     get_3dmake_defaults_toml_path,
+    get_packaged_executable_dir,
+    install_directory_to_user_path,
+    is_directory_on_path,
+    launch_in_terminal,
     resolve_3dm_binary_path,
     run_command_async,
 )
@@ -42,8 +52,9 @@ from .core import (
 # App-wide state
 # ──────────────────────────────────────────────────────────────────────────────
 
-_3dm_path: Optional[str] = None
-_current_file: Optional[Path] = None
+_3dm_path: str | None = None
+_current_file: Path | None = None
+_output_dialog_counter = 0
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -52,28 +63,450 @@ _current_file: Optional[Path] = None
 
 
 def _log(output_log: ui.log, message: str) -> None:
-    """Push a message to the output log widget."""
+    """Append a line of text to the UI log widget.
+
+    Parameters
+    ----------
+    output_log : nicegui.ui.log
+        Target log widget instance.
+    message : str
+        Message to append.
+    """
     output_log.push(message)
 
 
-async def _stream_command(
-    cmd: str, output_log: ui.log, cwd: Optional[str] = None
+def _open_text_output_dialog(
+    title: str,
+    content: str,
+    status_line: str | None = None,
+    trigger_button: ui.button | None = None,
+    ui_container=None,
 ) -> None:
-    """Stream a shell command's output into the NiceGUI log widget."""
-    _log(output_log, f"▶ {cmd}")
+    """Render command output in an accessible modal dialog.
+
+    Parameters
+    ----------
+    title : str
+        Dialog title shown to the user.
+    content : str
+        Raw command output text to display.
+    status_line : str or None, optional
+        Supplemental summary line (for example exit code and elapsed time).
+    trigger_button : nicegui.ui.button or None, optional
+        Button to refocus when the dialog is closed.
+    ui_container : Any, optional
+        Optional NiceGUI container to host the dialog when it must be rendered
+        in a specific slot context.
+    """
+    global _output_dialog_counter
+    _output_dialog_counter += 1
+
+    dialog_id = f"cmd-output-{_output_dialog_counter}"
+    title_id = f"{dialog_id}-title"
+    text_id = f"{dialog_id}-text"
+    raw_text = content or "(No output captured)"
+    numbered_lines = [f"{idx:04d} | {line}" for idx, line in enumerate(raw_text.splitlines(), start=1)]
+    numbered_text = "\n".join(numbered_lines) if numbered_lines else "0001 |"
+
+    def _build_dialog():
+        with (
+            ui.dialog().props(f'aria-modal="true" aria-labelledby="{title_id}"') as dlg,
+            ui.card().classes("w-[760px] max-w-[96vw]"),
+        ):
+            ui.label(title).props(f'id="{title_id}"').classes("text-base font-semibold")
+            if status_line:
+                ui.label(status_line).classes("text-xs font-mono text-gray-500")
+            ui.label("Use arrow keys to review output by line number. Press Escape or activate OK to close.").classes(
+                "text-xs text-gray-500"
+            )
+
+            output_box = (
+                ui.textarea(value=numbered_text, label="Command output (line numbered)")
+                .props(f'readonly id="{text_id}" aria-label="Command output text with line numbers"')
+                .classes("w-full font-mono text-sm")
+                .style("min-height: 20rem;")
+            )
+
+            def _close_output_dialog() -> None:
+                dlg.close()
+                if trigger_button is not None:
+                    trigger_button.run_method("focus")
+
+            output_box.on("keydown.escape", lambda _e: _close_output_dialog())
+
+            with ui.row().classes("w-full justify-end mt-2"):
+                ui.button("OK", on_click=_close_output_dialog).props(
+                    'color=primary size=sm aria-label="Close command output dialog"'
+                )
+        return dlg, output_box
+
+    if ui_container is not None:
+        with ui_container:
+            dlg, output_box = _build_dialog()
+    else:
+        dlg, output_box = _build_dialog()
+
+    dlg.open()
+    output_box.run_method("focus")
+
+
+async def _stream_command(
+    cmd: str,
+    output_log: ui.log,
+    cwd: str | None = None,
+    post_run=None,
+    show_popup: bool = False,
+    popup_title: str | None = None,
+    trigger_button: ui.button | None = None,
+    ui_container=None,
+) -> None:
+    """Execute a command and stream output into the GUI log.
+
+    Parameters
+    ----------
+    cmd : str
+        Shell command string to execute.
+    output_log : nicegui.ui.log
+        Log widget used for streamed output.
+    cwd : str or None, optional
+        Working directory for command execution.
+    post_run : callable or None, optional
+        Awaitable callback executed when the command exits successfully.
+    show_popup : bool, optional
+        Whether to display a line-numbered output dialog after completion.
+    popup_title : str or None, optional
+        Custom title for the output dialog.
+    trigger_button : nicegui.ui.button or None, optional
+        Button to focus after closing the output dialog.
+    ui_container : Any, optional
+        Optional dialog host container for slot-context safe rendering.
+    """
+    started_at = perf_counter()
+    _log(output_log, f"[RUN] {cmd}")
+    saw_error = False
+    final_rc = "?"
+    popup_lines: list[str] = []
+    if show_popup:
+        popup_lines.append(f"[RUN] {cmd}")
+
     async for line in run_command_async(cmd, cwd=cwd):
         if line.startswith("[done]"):
-            rc = line.split()[-1]
-            status = "✅ Done" if rc == "0" else f"❌ Exited with code {rc}"
+            rc_part = line[len("[done] ") :].strip()
+            rc = rc_part if rc_part else "?"
+            final_rc = rc
+            status = "[DONE] Done" if rc == "0" else f"[ERROR] Exited with code {rc}"
             _log(output_log, status)
+            if show_popup:
+                popup_lines.append(status)
+            if rc == "0" and post_run is not None:
+                await post_run()
         elif line.startswith("[stderr]"):
-            _log(output_log, line[9:])  # strip tag
+            saw_error = True
+            message = line[9:]
+            _log(output_log, message)  # strip tag
+            if show_popup:
+                popup_lines.append(f"[stderr] {message}")
         else:
-            _log(output_log, line[9:])  # strip [stdout]
+            message = line[9:]
+            _log(output_log, message)  # strip [stdout]
+            if show_popup:
+                popup_lines.append(message)
+
+    if show_popup:
+        elapsed = perf_counter() - started_at
+        _open_text_output_dialog(
+            popup_title or "3dm Command Output",
+            "\n".join(popup_lines).strip(),
+            status_line=f"Command: {cmd} | Exit: {final_rc} | Duration: {elapsed:.2f}s",
+            trigger_button=trigger_button,
+            ui_container=ui_container,
+        )
+
+    if saw_error:
+        ui.run_javascript("""
+            const logEl = document.querySelector('#section-log .nicegui-log');
+            if (logEl) {
+              logEl.setAttribute('aria-live', 'assertive');
+              setTimeout(() => logEl.setAttribute('aria-live', 'polite'), 1200);
+            }
+            """)
 
 
-def _find_project_root(path_value: str) -> Optional[Path]:
-    """Return project root if *path_value* is inside a 3dmake project."""
+def _sanitize_svg(svg_content: str) -> str:
+    """Normalize SVG text for inline HTML embedding.
+
+    Parameters
+    ----------
+    svg_content : str
+        SVG file content.
+
+    Returns
+    -------
+    str
+        SVG markup with XML declaration and doctype wrappers removed.
+    """
+    cleaned = svg_content
+    if cleaned.lstrip().startswith("<?xml"):
+        cleaned = cleaned[cleaned.find("?>") + 2 :]
+    stripped = cleaned.lstrip()
+    if stripped.startswith("<!DOCTYPE"):
+        end = stripped.find(">")
+        cleaned = stripped[end + 1 :] if end != -1 else stripped
+    return cleaned.strip()
+
+
+async def _open_svg_viewer(
+    project_root: Path | None,
+    model_name: str,
+    view: str,
+    log_widget: ui.log | None,
+    trigger_button: ui.button | None = None,
+) -> None:
+    """Open a generated SVG preview in an accessible dialog.
+
+    Parameters
+    ----------
+    project_root : pathlib.Path or None
+        Root directory of the active 3dmake project.
+    model_name : str
+        Model name used to compute the output file path.
+    view : str
+        View identifier used in the output file naming convention.
+    log_widget : nicegui.ui.log or None
+        Optional log widget for informational status messages.
+    trigger_button : nicegui.ui.button or None, optional
+        Button to refocus after closing the dialog.
+    """
+    if project_root is None:
+        if log_widget is not None:
+            _log(log_widget, "[info] Preview complete. SVG location is unknown.")
+        return
+
+    svg_path = project_root / "build" / f"{model_name}-{view}.svg"
+    if not svg_path.exists():
+        if log_widget is not None:
+            _log(
+                log_widget,
+                "[info] Preview complete. SVG not found at expected path; check build directory.",
+            )
+        return
+
+    svg_content = _sanitize_svg(svg_path.read_text(encoding="utf-8"))
+
+    with (
+        ui.dialog().props('aria-modal="true" aria-labelledby="svg-dlg-title"') as dlg,
+        ui.card().classes("w-[600px] max-w-[95vw]"),
+    ):
+        ui.label(f"Preview: {model_name} ({view})").props('id="svg-dlg-title"').classes("text-base font-semibold")
+        ui.html(
+            f'<div role="img" aria-label="Tactile preview silhouette of {html.escape(model_name)} from view {html.escape(view)}" '
+            f'style="width:100%;overflow:auto;">{svg_content}</div>'
+        )
+        with ui.row().classes("gap-2 mt-2 items-center"):
+            ui.link("Download SVG", target=str(svg_path), new_tab=True).props(
+                'aria-label="Download the SVG file for embossing or swell paper printing"'
+            )
+
+            def _close_svg() -> None:
+                dlg.close()
+                if trigger_button is not None:
+                    trigger_button.run_method("focus")
+
+            ui.button("Close", on_click=_close_svg).props('flat size=sm aria-label="Close SVG preview"')
+    dlg.open()
+    if log_widget is not None:
+        _log(log_widget, f"[info] Preview SVG opened: {svg_path.name}")
+
+
+async def _open_stl_viewer(
+    stl_path: Path,
+    log_widget: ui.log | None,
+    trigger_button: ui.button | None = None,
+) -> None:
+    """Open an STL file in the interactive Three.js viewer dialog.
+
+    Parameters
+    ----------
+    stl_path : pathlib.Path
+        Path to the STL file to render.
+    log_widget : nicegui.ui.log or None
+        Optional log widget for status updates.
+    trigger_button : nicegui.ui.button or None, optional
+        Button to refocus after closing the dialog.
+
+    Notes
+    -----
+    The viewer is initialized client-side with Three.js, STLLoader, and
+    OrbitControls loaded from CDN assets.
+    """
+    if not stl_path.exists() or stl_path.suffix.lower() != ".stl":
+        ui.notify("STL file not found.", type="warning")
+        return
+
+    stl_b64 = base64.b64encode(stl_path.read_bytes()).decode("ascii")
+    dims_text = "Install trimesh for bounding box dimensions."
+    try:
+        import trimesh
+
+        mesh = trimesh.load(str(stl_path), force="mesh")
+        bb = mesh.bounding_box.extents
+        dims_text = f"Width: {bb[0]:.1f} mm  Depth: {bb[1]:.1f} mm  Height: {bb[2]:.1f} mm"
+    except (ImportError, OSError, ValueError):
+        pass
+
+    safe_stem = "".join(ch if ch.isalnum() else "-" for ch in stl_path.stem).strip("-")
+    if not safe_stem:
+        safe_stem = "model"
+    dialog_id = f"stl-dlg-{safe_stem}"
+    canvas_id = f"stl-canvas-{safe_stem}"
+    live_id = f"stl-live-{safe_stem}"
+
+    with (
+        ui.dialog().props(f'id="{dialog_id}" aria-modal="true" aria-labelledby="{dialog_id}-title"') as dlg,
+        ui.card().classes("w-[700px] max-w-[95vw]"),
+    ):
+        ui.label(f"3D View: {stl_path.name}").props(f'id="{dialog_id}-title"').classes("text-base font-semibold")
+        ui.label(dims_text).classes("text-sm font-mono").props('aria-label="Bounding box dimensions" tabindex="0"')
+        ui.label("Controls: drag to rotate, scroll to zoom, R to reset, arrow keys to rotate by 15 degrees").classes(
+            "text-xs text-gray-400"
+        )
+        ui.html(
+            f'<canvas id="{canvas_id}" width="660" height="440" tabindex="0" role="img" '
+            f'aria-label="Interactive 3D view of {html.escape(stl_path.name)}. Use arrow keys to rotate, plus and minus to zoom."></canvas>'
+            f'<div id="{live_id}" role="status" aria-live="polite" '
+            'style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);"></div>'
+        )
+
+        def _close_stl() -> None:
+            dlg.close()
+            if trigger_button is not None:
+                trigger_button.run_method("focus")
+
+        with ui.row().classes("gap-2 mt-2"):
+            ui.button("Close", on_click=_close_stl).props('flat size=sm aria-label="Close 3D viewer"')
+
+    dlg.open()
+    ui.run_javascript(f"""
+        (function() {{
+          const ensureScript = (src) => new Promise((resolve, reject) => {{
+            if ([...document.scripts].some(s => s.src.includes(src))) return resolve();
+            const sc = document.createElement('script');
+            sc.src = src;
+            sc.onload = resolve;
+            sc.onerror = reject;
+            document.head.appendChild(sc);
+          }});
+
+          const init = async () => {{
+            await ensureScript('cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js');
+            await ensureScript('cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js');
+            await ensureScript('cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js');
+
+            const canvas = document.getElementById('{canvas_id}');
+            if (!canvas) return;
+
+            const renderer = new THREE.WebGLRenderer({{ canvas: canvas, antialias: true }});
+            renderer.setPixelRatio(window.devicePixelRatio || 1);
+            renderer.setSize(canvas.width, canvas.height, false);
+
+            const scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x111827);
+            const camera = new THREE.PerspectiveCamera(50, canvas.width / canvas.height, 0.1, 5000);
+            camera.position.set(120, 90, 140);
+
+            scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+            const dl = new THREE.DirectionalLight(0xffffff, 0.7);
+            dl.position.set(1, 1, 2);
+            scene.add(dl);
+
+            const bytes = atob('{stl_b64}');
+            const arr = new Uint8Array(bytes.length);
+            for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+            const loader = new THREE.STLLoader();
+            const geom = loader.parse(arr.buffer);
+            geom.computeBoundingBox();
+            geom.computeVertexNormals();
+            const mat = new THREE.MeshPhongMaterial({{ color: 0x93c5fd, specular: 0x111111, shininess: 25 }});
+            const mesh = new THREE.Mesh(geom, mat);
+            const box = geom.boundingBox;
+            const center = new THREE.Vector3();
+            box.getCenter(center);
+            mesh.position.sub(center);
+            scene.add(mesh);
+
+            const controls = new THREE.OrbitControls(camera, canvas);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.08;
+
+            const size = new THREE.Vector3();
+            box.getSize(size);
+            const maxDim = Math.max(size.x, size.y, size.z) || 1;
+            camera.position.set(maxDim * 1.5, maxDim * 1.2, maxDim * 1.8);
+            controls.update();
+
+            const live = document.getElementById('{live_id}');
+            const announce = () => {{
+              if (!live) return;
+              const az = THREE.MathUtils.radToDeg(controls.getAzimuthalAngle()).toFixed(0);
+              const el = THREE.MathUtils.radToDeg(controls.getPolarAngle()).toFixed(0);
+              live.textContent = '';
+              requestAnimationFrame(() => {{
+                live.textContent = `Rotated to ${{az}} degrees azimuth, ${{el}} degrees elevation`;
+              }});
+            }};
+
+            canvas.addEventListener('keydown', (e) => {{
+              let acted = false;
+              const step = Math.PI / 12;
+              if (e.key === 'ArrowLeft') {{ controls.rotateLeft(step); acted = true; }}
+              if (e.key === 'ArrowRight') {{ controls.rotateLeft(-step); acted = true; }}
+              if (e.key === 'ArrowUp') {{ controls.rotateUp(step); acted = true; }}
+              if (e.key === 'ArrowDown') {{ controls.rotateUp(-step); acted = true; }}
+              if (e.key === '+' || e.key === '=') {{ camera.position.multiplyScalar(0.9); acted = true; }}
+              if (e.key === '-' || e.key === '_') {{ camera.position.multiplyScalar(1.1); acted = true; }}
+              if (e.key.toLowerCase() === 'r') {{
+                camera.position.set(maxDim * 1.5, maxDim * 1.2, maxDim * 1.8);
+                controls.target.set(0, 0, 0);
+                acted = true;
+              }}
+              if (acted) {{
+                e.preventDefault();
+                controls.update();
+                announce();
+              }}
+            }});
+
+            controls.addEventListener('change', announce);
+
+            const animate = () => {{
+              controls.update();
+              renderer.render(scene, camera);
+              requestAnimationFrame(animate);
+            }};
+            animate();
+          }};
+
+          init().catch((err) => console.error('STL viewer failed', err));
+        }})();
+        """)
+    if log_widget is not None:
+        _log(log_widget, f"[info] Opened STL viewer for: {stl_path.name}")
+
+
+def _find_project_root(path_value: str) -> Path | None:
+    """Resolve a file or directory path to its containing 3dmake project root.
+
+    Parameters
+    ----------
+    path_value : str
+        User-selected file or directory path.
+
+    Returns
+    -------
+    pathlib.Path or None
+        Nearest ancestor containing ``3dmake.toml``, or ``None`` if no project
+        root can be determined.
+    """
     if not path_value:
         return None
 
@@ -86,7 +519,15 @@ def _find_project_root(path_value: str) -> Optional[Path]:
 
 
 def _ensure_project_layout(project_root: Path, project_name: str) -> None:
-    """Create required 3dmake folders/files if they don't exist yet."""
+    """Create required project folders and baseline configuration files.
+
+    Parameters
+    ----------
+    project_root : pathlib.Path
+        Directory where project layout should exist.
+    project_name : str
+        Name written into a newly created ``3dmake.toml`` file.
+    """
     (project_root / "src").mkdir(parents=True, exist_ok=True)
     (project_root / "build").mkdir(parents=True, exist_ok=True)
 
@@ -105,15 +546,38 @@ def _ensure_project_layout(project_root: Path, project_name: str) -> None:
 
 
 def _normalize_scad_filename(name: str) -> str:
-    """Ensure the filename is non-empty and ends with .scad."""
+    """Normalize a SCAD filename for project file creation.
+
+    Parameters
+    ----------
+    name : str
+        Raw filename entered by the user.
+
+    Returns
+    -------
+    str
+        Filename guaranteed to be non-empty and to end with ``.scad``.
+    """
     cleaned = (name or "").strip() or "model.scad"
     if not cleaned.lower().endswith(".scad"):
         cleaned = f"{cleaned}.scad"
     return cleaned
 
 
-def _pick_directory_native(initial_dir: Optional[str] = None) -> Optional[str]:
-    """Open a native directory picker dialog and return selected path."""
+def _pick_directory_native(initial_dir: str | None = None) -> str | None:
+    """Open a directory picker and return the selected directory.
+
+    Parameters
+    ----------
+    initial_dir : str or None, optional
+        Initial directory displayed by the native picker.
+
+    Returns
+    -------
+    str or None
+        Selected directory path, or ``None`` when selection is canceled or no
+        native picker is available.
+    """
     # Prefer pywebview's native dialog when available; this matches the
     # host platform's file-picker look/scale better than Tk on HiDPI displays.
     try:
@@ -167,19 +631,64 @@ def _pick_directory_native(initial_dir: Optional[str] = None) -> Optional[str]:
 
 @ui.page("/")
 def index() -> None:
+    """Build and render the main application page.
+
+    Notes
+    -----
+    This page wires together all primary UI regions: project/file selection,
+    quick command actions, command options, source editor, output log, and
+    application settings. It also initializes persisted GUI preferences.
+    """
     global _3dm_path
 
     _3dm_path = find_3dm_binary()
+    settings_path = get_3dmake_config_dir() / "gui_settings.json"
+    packaged_dir = get_packaged_executable_dir()
+
+    def _load_gui_settings() -> dict:
+        if not settings_path.exists():
+            return {}
+        try:
+            return json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def _save_gui_settings(settings: dict) -> None:
+        try:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
+    _gui_settings = _load_gui_settings()
+
+    def _should_offer_path_install() -> bool:
+        if packaged_dir is None:
+            return False
+        if is_directory_on_path(packaged_dir):
+            _gui_settings["path_install_prompted_for"] = str(packaged_dir)
+            _save_gui_settings(_gui_settings)
+            return False
+        return _gui_settings.get("path_install_prompted_for") != str(packaged_dir)
+
+    def _mark_path_prompt_seen() -> None:
+        if packaged_dir is None:
+            return
+        _gui_settings["path_install_prompted_for"] = str(packaged_dir)
+        _save_gui_settings(_gui_settings)
 
     # ── Header ────────────────────────────────────────────────────────────────
     # ── Appearance state (font size + theme) ─────────────────────────────────
     _font_state = {"size": "medium"}  # "medium" | "large" | "xlarge"
+    _wrap_state = {"enabled": bool(_gui_settings.get("editor_word_wrap", False))}
     EDITOR_PX = {"medium": 14, "large": 17, "xlarge": 20}
     FONT_SIZES = [
         ("Medium", "medium"),
         ("Large", "large"),
         ("X-Large", "xlarge"),
     ]
+    _log_ref: list = [None]
+    _popup_host_ref: list = [None]
     # font radio buttons wired after the drawer is built
     _font_radio: list = [None]
 
@@ -195,10 +704,27 @@ def index() -> None:
             if (ed) ed.style.fontSize = '{px}px';
         """)
 
+    def _apply_word_wrap(enabled: bool) -> None:
+        """Toggle visual line wrapping in CodeMirror content."""
+        _wrap_state["enabled"] = enabled
+        _gui_settings["editor_word_wrap"] = enabled
+        _save_gui_settings(_gui_settings)
+        wrap = "true" if enabled else "false"
+        ui.run_javascript(f"""
+            const useWrap = {wrap};
+            document.querySelectorAll('#section-editor .cm-content').forEach((el) => {{
+              el.style.whiteSpace = useWrap ? 'pre-wrap' : 'pre';
+              el.style.wordBreak = useWrap ? 'break-word' : 'normal';
+            }});
+            document.querySelectorAll('#section-editor .cm-line').forEach((el) => {{
+              el.style.whiteSpace = useWrap ? 'pre-wrap' : 'pre';
+            }});
+            const scroller = document.querySelector('#section-editor .cm-scroller');
+            if (scroller) scroller.style.overflowX = useWrap ? 'hidden' : 'auto';
+            """)
+
     # ── Header ────────────────────────────────────────────────────────────────
-    with ui.header().classes(
-        "items-center justify-between bg-gray-900 text-white px-4 py-2"
-    ):
+    with ui.header().classes("items-center justify-between bg-gray-900 text-white px-4 py-2"):
         ui.label("3DMake GUI").classes("text-xl font-bold tracking-wide")
 
         if _3dm_path:
@@ -208,8 +734,41 @@ def index() -> None:
 
         # ⚙ Settings button — opens the right drawer
         ui.button(icon="settings", on_click=lambda: settings_drawer.toggle()).props(
-            "flat round color=white"
+            "flat round color=white aria-label='Open appearance settings: theme and font size'"
         ).tooltip("Appearance settings (theme & font size)")
+
+    if packaged_dir is not None and _should_offer_path_install():
+        with (
+            ui.dialog().props('aria-modal="true" aria-labelledby="path-install-title"') as path_dlg,
+            ui.card().classes("w-[42rem] max-w-[96vw]"),
+        ):
+            ui.label("Add 3dmake-gui to PATH?").props('id="path-install-title"').classes("text-base font-semibold")
+            ui.label(
+                "This packaged build can add its application folder to your user PATH so "
+                "you can launch 3dmake-gui from a terminal or command prompt."
+            ).classes("text-sm")
+            ui.label(str(packaged_dir)).classes("text-xs font-mono text-gray-400")
+            ui.label("This affects only your user PATH, not the system-wide PATH.").classes("text-xs text-gray-500")
+
+            def _close_path_dialog() -> None:
+                _mark_path_prompt_seen()
+                path_dlg.close()
+
+            def _install_gui_path() -> None:
+                ok, message = install_directory_to_user_path(packaged_dir)
+                _mark_path_prompt_seen()
+                ui.notify(message, type="positive" if ok else "negative")
+                path_dlg.close()
+
+            with ui.row().classes("gap-2 mt-3 justify-end"):
+                ui.button("Add to PATH", on_click=_install_gui_path).props(
+                    'color=primary size=sm aria-label="Add packaged application folder to PATH"'
+                )
+                ui.button("Not Now", on_click=_close_path_dialog).props(
+                    'flat size=sm aria-label="Dismiss PATH installation prompt"'
+                )
+
+        path_dlg.open()
 
     # ── Settings drawer (right side, opened by ⚙ button above) ───────────────
     # Declared here so the header button can reference it; content filled below
@@ -229,8 +788,16 @@ def index() -> None:
             {sz: lbl for lbl, sz in FONT_SIZES},
             value="medium",
             on_change=lambda e: _apply_font_size(e.value),
-        ).props("color=primary")
+        ).props('color=primary aria-label="Text size selector"')
         _font_radio[0] = font_radio
+
+        ui.separator().classes("my-4")
+
+        ui.switch(
+            "Word Wrap (Editor)",
+            value=bool(_wrap_state["enabled"]),
+            on_change=lambda e: _apply_word_wrap(bool(e.value)),
+        ).props('aria-label="Toggle word wrap in code editor"')
 
         ui.separator().classes("my-4")
 
@@ -325,9 +892,9 @@ def index() -> None:
         width: 100% !important;
         box-sizing: border-box;
         /* total right column height minus the two fixed cards and gaps */
-                height: calc(100dvh - {HDR}px - {FTR}px - var(--cmd-card-h) - {LOG_H}px - {
-        3 * GAP
-    }px - {2 * PAD}px);
+                height: calc(100dvh - {HDR}px - {FTR}px - var(--cmd-card-h) - {
+        LOG_H
+    }px - {3 * GAP}px - {2 * PAD}px);
         min-height: 200px;
       }}
       /* codemirror sits directly inside the card; give it all remaining space */
@@ -435,13 +1002,14 @@ def index() -> None:
 
     # ── Two-column body ────────────────────────────────────────────────────────
     with ui.row().classes("app-body"):
+        _popup_host_ref[0] = ui.element("div").classes("w-0 h-0 overflow-hidden")
         # ── LEFT PANEL ────────────────────────────────────────────────────────
         with ui.column().classes("left-panel"):
             # 1. Project / File ────────────────────────────────────────────────
             with (
                 ui.card()
                 .classes("w-full")
-                .props('id="section-file" aria-label="Project and file selection"')
+                .props('id="section-file" aria-label="Project and file selection" role="region"')
             ):
                 ui.label("Project / File").classes("text-base font-semibold mb-1")
 
@@ -450,10 +1018,10 @@ def index() -> None:
                     placeholder="/home/user/model/src/model.scad",
                 ).classes("w-full text-sm")
 
-                _editor_path_label_ref: list[Optional[ui.label]] = [None]
+                _editor_path_label_ref: list[ui.label | None] = [None]
 
-                def _update_editor_filepath(path_value: Optional[str] = None) -> None:
-                    value = (path_value if path_value is not None else file_input.value)
+                def _update_editor_filepath(path_value: str | None = None) -> None:
+                    value = path_value if path_value is not None else file_input.value
                     text = value.strip() if value else ""
                     display = text if text else "No Project Slected"
                     if _editor_path_label_ref[0] is not None:
@@ -466,20 +1034,20 @@ def index() -> None:
                 def handle_upload(e):
                     # Prefer the full temp path exposed on newer NiceGUI versions;
                     # fall back to just the filename so the field always updates.
-                    resolved = (
-                        getattr(getattr(e, "content", None), "name", None) or e.name
-                    )
+                    resolved = getattr(getattr(e, "content", None), "name", None) or e.name
                     file_input.set_value(resolved)
                     _update_editor_filepath(resolved)
                     ui.notify(f"Selected: {e.name}", type="positive")
 
-                file_upload = (
+                (
                     ui.upload(
                         label="Drop a .scad / .stl here",
                         on_upload=handle_upload,
                         max_file_size=50_000_000,
                     )
-                    .props("accept=.scad,.stl,.3mf flat")
+                    .props(
+                        "accept=.scad,.stl,.3mf flat aria-label='Upload a .scad, .stl, or .3mf file - drag and drop or click Browse'"
+                    )
                     .classes("w-full mt-2")
                 )
 
@@ -490,59 +1058,458 @@ def index() -> None:
                     on_click=lambda: ui.run_javascript(
                         "document.querySelector('.q-uploader input[type=file]').click()"
                     ),
-                ).props("outline size=sm").classes("w-full mt-1")
+                ).props("outline size=sm aria-label='Browse for a file to load'").classes("w-full mt-1")
 
-            # 2. Quick Actions ─────────────────────────────────────────────────
             with (
-                ui.card()
+                ui.expansion("Command Options", icon="tune")
                 .classes("w-full")
-                .props('id="section-quick" aria-label="Quick actions"')
+                .props('id="section-options" aria-label="Command options" role="region"')
             ):
-                ui.label("Quick Actions").classes("text-base font-semibold mb-1")
-                ui.label("Runs against the file path above.").classes(
-                    "text-xs text-gray-500 mb-2"
+                _opt_model = (
+                    ui.input(label="Model name (-m)", value="")
+                    .classes("w-full")
+                    .props('aria-label="Model name option: -m"')
+                    .tooltip("Set model name using -m")
+                )
+                _opt_view = (
+                    ui.select(
+                        options=[
+                            "3sil",
+                            "frontsil",
+                            "backsil",
+                            "leftsil",
+                            "rightsil",
+                            "topsil",
+                        ],
+                        value="3sil",
+                        label="View (-v)",
+                    )
+                    .classes("w-full")
+                    .props('aria-label="View option: -v"')
+                    .tooltip("Set silhouette view using -v")
+                )
+                _opt_profile = (
+                    ui.input(label="Profile (-p)", value="")
+                    .classes("w-full")
+                    .props('aria-label="Profile option: -p"')
+                    .tooltip("Set slicer profile using -p")
+                )
+                _opt_overlay = (
+                    ui.input(
+                        label="Overlays (-o, comma separated)",
+                        value="",
+                        placeholder="supports,fast",
+                    )
+                    .classes("w-full")
+                    .props('aria-label="Overlay options: repeated -o flags"')
+                    .tooltip("Comma-separated overlays map to repeated -o flags")
+                )
+                _opt_scale = (
+                    ui.number(label="Scale (-s)", value=1.0, step=0.05)
+                    .classes("w-full")
+                    .props('aria-label="Scale option: -s"')
+                    .tooltip("Scale model with -s")
+                )
+                _opt_copies = (
+                    ui.number(label="Copies (-c)", value=1, step=1)
+                    .classes("w-full")
+                    .props('aria-label="Copies option: -c"')
+                    .tooltip("Set copies count with -c")
+                )
+                _opt_debug = (
+                    ui.switch("Enable debug (--debug)", value=False)
+                    .props('aria-label="Debug flag: --debug"')
+                    .tooltip("Enable debug output with --debug")
+                )
+                _opt_interactive = (
+                    ui.switch("Interactive info (-i)", value=False)
+                    .props('aria-label="Interactive info flag: -i"')
+                    .tooltip("Enable interactive mode for info with -i")
                 )
 
-                output_log: ui.log  # forward-declared; assigned in right panel below
+                def _build_flags() -> str:
+                    parts: list[str] = []
+                    model = (_opt_model.value or "").strip()
+                    view = (_opt_view.value or "").strip()
+                    profile = (_opt_profile.value or "").strip()
+                    overlays_raw = (_opt_overlay.value or "").strip()
+                    scale_val = float(_opt_scale.value or 1.0)
+                    copies_val = int(_opt_copies.value or 1)
+
+                    if model:
+                        parts.extend(["-m", model])
+                    if view:
+                        parts.extend(["-v", view])
+                    if profile:
+                        parts.extend(["-p", profile])
+                    if overlays_raw:
+                        for ov in [o.strip() for o in overlays_raw.split(",") if o.strip()]:
+                            parts.extend(["-o", ov])
+                    if scale_val != 1.0:
+                        parts.extend(["-s", str(scale_val)])
+                    if copies_val != 1:
+                        parts.extend(["-c", str(copies_val)])
+                    if _opt_debug.value:
+                        parts.append("--debug")
+                    if _opt_interactive.value:
+                        parts.append("-i")
+
+                    return " ".join(parts)
+
+            # 2. Quick Actions ─────────────────────────────────────────────────
+            with ui.card().classes("w-full").props('id="section-quick" aria-label="Quick actions" role="region"'):
+                ui.label("Quick Actions").classes("text-base font-semibold mb-1")
+                ui.label("Runs against the file path above.").classes("text-xs text-gray-500 mb-2")
 
                 quick_cmds = [
-                    ("Describe", "3dm describe {file}", "Describe shape with AI"),
-                    ("Render STL", "3dm render {file}", "Render .scad → .stl"),
-                    ("Slice", "3dm slice {file}", "Slice .stl for printing"),
-                    ("Orient", "3dm orient {file}", "Auto-orient for printing"),
-                    ("Preview", "3dm preview {file}", "Generate 2-D tactile preview"),
-                    ("New Project", "3dm new", "Scaffold a new 3dmake project"),
+                    (
+                        "Describe (Info)",
+                        "3dm info {file}",
+                        "Describe shape with AI using 3dm info",
+                        "Describe model: runs 3dm info",
+                        False,
+                    ),
+                    (
+                        "Build STL",
+                        "3dm build {file}",
+                        "Compile .scad to .stl using 3dm build",
+                        "Build STL: runs 3dm build",
+                        False,
+                    ),
+                    (
+                        "Slice",
+                        "3dm slice {file}",
+                        "Slice .stl for printing",
+                        "Slice model: runs 3dm slice",
+                        False,
+                    ),
+                    (
+                        "Orient",
+                        "3dm orient {file}",
+                        "Auto-orient for printing",
+                        "Orient model: runs 3dm orient",
+                        False,
+                    ),
+                    (
+                        "Preview",
+                        "3dm preview {file}",
+                        "Generate 2-D tactile preview",
+                        "Preview model: runs 3dm preview",
+                        False,
+                    ),
+                    (
+                        "New Project",
+                        "3dm new",
+                        "Scaffold a new 3dmake project",
+                        "Create project: runs 3dm new",
+                        False,
+                    ),
+                    (
+                        "Build + Slice",
+                        "3dm build slice {file}",
+                        "Compile .scad then slice to .gcode",
+                        "Build and slice: runs 3dm build slice",
+                        False,
+                    ),
+                    (
+                        "Full Pipeline",
+                        "3dm build orient slice {file}",
+                        "Build, auto-orient, then slice",
+                        "Full pipeline: runs 3dm build orient slice",
+                        False,
+                    ),
+                    (
+                        "Print",
+                        "3dm print",
+                        "Send sliced file to printer (OctoPrint / Bambu)",
+                        "Print: runs 3dm print",
+                        True,
+                    ),
+                    (
+                        "View STL",
+                        "__view_stl__",
+                        "Open STL in 3D viewer",
+                        "View STL file in 3D viewer",
+                        False,
+                    ),
                 ]
 
-                with ui.grid(columns=2).classes("w-full gap-2"):
-                    for btn_label, cmd_tpl, tip in quick_cmds:
+                preview_btn_ref: list[ui.button | None] = [None]
 
-                        def _make_handler(tpl=cmd_tpl):
+                with (
+                    ui.grid(columns=3)
+                    .classes("w-full gap-2")
+                    .props('role="toolbar" aria-label="Quick 3dm actions" aria-orientation="horizontal"')
+                ):
+                    for (
+                        btn_label,
+                        cmd_tpl,
+                        tip,
+                        aria_label,
+                        needs_project,
+                    ) in quick_cmds:
+
+                        def _make_handler(
+                            tpl=cmd_tpl,
+                            label=btn_label,
+                            requires_project=needs_project,
+                        ):
                             async def handler():
+                                if _log_ref[0] is None:
+                                    return
+
                                 path = file_input.value.strip()
                                 if not path and "{file}" in tpl:
+                                    ui.notify("Enter a file path first.", type="warning")
+                                    return
+
+                                if tpl == "__view_stl__":
+                                    if not path.lower().endswith(".stl"):
+                                        ui.notify(
+                                            "Set an .stl file path first.",
+                                            type="warning",
+                                        )
+                                        return
+                                    await _open_stl_viewer(Path(path), _log_ref[0])
+                                    return
+
+                                project_root = _find_project_root(path)
+
+                                if requires_project and project_root is None:
                                     ui.notify(
-                                        "Enter a file path first.", type="warning"
+                                        "No 3dmake project found at that path. Run 3dm new first.",
+                                        type="warning",
                                     )
                                     return
-                                cmd = tpl.replace("{file}", f'"{path}"')
+
+                                cmd = tpl
+                                if "{file}" in tpl:
+                                    cmd = cmd.replace("{file}", f'"{path}"')
+
+                                flags = _build_flags().strip()
+                                if flags and label != "New Project":
+                                    cmd = f"{cmd} {flags}".strip()
+
                                 if _3dm_path:
                                     cmd = cmd.replace("3dm ", f'"{_3dm_path}" ', 1)
-                                await _stream_command(cmd, output_log)
+
+                                post_run = None
+                                if label == "Preview":
+                                    model_name = (_opt_model.value or "").strip() or "main"
+                                    view = (_opt_view.value or "").strip() or "3sil"
+
+                                    def post_run():
+                                        _open_svg_viewer(
+                                            project_root,
+                                            model_name,
+                                            view,
+                                            _log_ref[0],
+                                            preview_btn_ref[0],
+                                        )
+
+                                await _stream_command(
+                                    cmd,
+                                    _log_ref[0],
+                                    cwd=str(project_root) if project_root else None,
+                                    post_run=post_run,
+                                    show_popup=True,
+                                    popup_title=f"{label} Output",
+                                    ui_container=_popup_host_ref[0],
+                                )
 
                             return handler
 
-                        ui.button(btn_label, on_click=_make_handler()).tooltip(
-                            tip
-                        ).props("size=sm").classes("w-full")
+                        btn = (
+                            ui.button(btn_label, on_click=_make_handler())
+                            .tooltip(tip)
+                            .props(f'size=sm aria-label="{aria_label}"')
+                            .classes("w-full")
+                        )
+                        if btn_label == "Preview":
+                            preview_btn_ref[0] = btn
+
+                async def _open_last_svg() -> None:
+                    await _open_svg_viewer(
+                        _find_project_root((file_input.value or "").strip()),
+                        (_opt_model.value or "").strip() or "main",
+                        (_opt_view.value or "").strip() or "3sil",
+                        _log_ref[0],
+                        preview_btn_ref[0],
+                    )
+
+                ui.button(
+                    "View Last SVG",
+                    on_click=_open_last_svg,
+                ).props(
+                    'size=sm aria-label="Open previously generated SVG preview"'
+                ).classes("w-full mt-2")
+
+            with (
+                ui.expansion("Image Export", icon="photo_camera")
+                .classes("w-full")
+                .props('id="section-image" aria-label="Image export" role="region"')
+            ):
+                angle_select = ui.select(
+                    options=[
+                        "above_front_left",
+                        "above_front",
+                        "above_front_right",
+                        "front",
+                        "back",
+                        "left",
+                        "right",
+                        "top",
+                        "bottom",
+                        "above_back_left",
+                        "above_back_right",
+                    ],
+                    multiple=True,
+                    label="Camera angles",
+                    value=["above_front_left", "above_front", "above_front_right"],
+                ).classes("w-full")
+                colorscheme_select = ui.select(
+                    options=["slicer_light", "slicer_dark", "light_on_dark"],
+                    value="slicer_dark",
+                    label="Color scheme",
+                ).classes("w-full")
+                image_size_input = ui.input(label="Image size", value="1080x720", placeholder="1080x720").classes(
+                    "w-full"
+                )
+
+                async def _run_image_export() -> None:
+                    path = (file_input.value or "").strip()
+                    if not path:
+                        ui.notify("Enter a file path first.", type="warning")
+                        return
+                    if _log_ref[0] is None:
+                        return
+
+                    project_root = _find_project_root(path)
+                    if project_root is None:
+                        ui.notify(
+                            "No 3dmake project found at that path. Run 3dm new first.",
+                            type="warning",
+                        )
+                        return
+
+                    angles = angle_select.value or []
+                    if not angles:
+                        ui.notify("Choose at least one camera angle.", type="warning")
+                        return
+
+                    angle_flags = " ".join(f"-a {a}" for a in angles)
+                    cmd = (
+                        f"3dm image {angle_flags} --colorscheme {colorscheme_select.value} "
+                        f'--image-size {image_size_input.value} "{path}"'
+                    )
+                    if _3dm_path:
+                        cmd = cmd.replace("3dm ", f'"{_3dm_path}" ', 1)
+
+                    before = set((project_root / "build").glob("*.png"))
+                    await _stream_command(
+                        cmd,
+                        _log_ref[0],
+                        cwd=str(project_root),
+                        show_popup=True,
+                        popup_title="Image Export Output",
+                        ui_container=_popup_host_ref[0],
+                    )
+                    after = set((project_root / "build").glob("*.png"))
+                    created = sorted(after - before)
+
+                    if not created:
+                        ui.notify("Image export finished. No new PNG files detected.")
+                        return
+
+                    with (
+                        ui.dialog().props(
+                            'role="dialog" aria-label="Image export results" aria-modal="true"'
+                        ) as img_dlg,
+                        ui.card().classes("w-[760px] max-w-[95vw]"),
+                    ):
+                        ui.label("Image export results").classes("text-base font-semibold")
+                        with ui.column().classes("w-full gap-2"):
+                            for png in created:
+                                angle_name = png.stem.split("-")[-1]
+                                ui.image(str(png)).classes("w-full").props(f'aria-label="Model render: {angle_name}"')
+                        ui.button("Close", on_click=img_dlg.close).props(
+                            'flat size=sm aria-label="Close image export results"'
+                        )
+                    img_dlg.open()
+
+                ui.button("Run Image Export", on_click=_run_image_export).props(
+                    'size=sm aria-label="Export images: runs 3dm image with selected angles"'
+                ).classes("w-full")
 
             # ── Settings card ─────────────────────────────────────────────────
-            with (
-                ui.card()
-                .classes("w-full")
-                .props('id="section-settings" aria-label="Settings"')
-            ):
+            with ui.card().classes("w-full").props('id="section-settings" aria-label="Settings" role="region"'):
                 ui.label("Settings").classes("text-base font-semibold mb-1")
+
+                def _with_binary(cmd: str) -> str:
+                    if _3dm_path and cmd.startswith("3dm "):
+                        return cmd.replace("3dm ", f'"{_3dm_path}" ', 1)
+                    return cmd
+
+                def _project_root_from_input() -> Path | None:
+                    return _find_project_root((file_input.value or "").strip())
+
+                async def _run_settings_command(cmd: str, needs_project: bool = False):
+                    if _log_ref[0] is None:
+                        return
+                    project_root = _project_root_from_input()
+                    if needs_project and project_root is None:
+                        ui.notify(
+                            "No 3dmake project found at that path. Run 3dm new first.",
+                            type="warning",
+                        )
+                        return
+                    await _stream_command(
+                        _with_binary(cmd),
+                        _log_ref[0],
+                        cwd=str(project_root) if project_root else None,
+                        show_popup=True,
+                        popup_title=f"{cmd} Output",
+                        ui_container=_popup_host_ref[0],
+                    )
+
+                def _launch_in_terminal_ui(cmd: str) -> None:
+                    launched = launch_in_terminal(_with_binary(cmd))
+                    if launched:
+                        ui.notify("Opened command in system terminal.", type="positive")
+                    else:
+                        ui.notify(
+                            "No supported terminal emulator found. Run the command manually.",
+                            type="warning",
+                        )
+
+                setup_btn_ref: list[ui.button | None] = [None]
+
+                def open_setup_dialog() -> None:
+                    with (
+                        ui.dialog().props('aria-modal="true" aria-labelledby="setup-dlg-title"') as dlg,
+                        ui.card().classes("w-[34rem]"),
+                    ):
+                        ui.label("Run 3dm setup").props('id="setup-dlg-title"').classes("text-base font-semibold")
+                        ui.label(
+                            "3dm setup is an interactive command that requires terminal input. "
+                            "Click Launch in Terminal to open it in your system terminal, "
+                            "or run it manually."
+                        ).classes("text-xs text-gray-500")
+
+                        def _close_setup() -> None:
+                            dlg.close()
+                            if setup_btn_ref[0] is not None:
+                                setup_btn_ref[0].run_method("focus")
+
+                        with ui.row().classes("gap-2 mt-2"):
+                            ui.button(
+                                "Launch in Terminal",
+                                on_click=lambda: _launch_in_terminal_ui("3dm setup"),
+                            ).props('color=primary size=sm aria-label="Launch 3dm setup in terminal"')
+                            ui.button("Close", on_click=_close_setup).props(
+                                'flat size=sm aria-label="Close setup dialog"'
+                            )
+                    dlg.open()
 
                 # Global config (defaults.toml) — load into editor
                 async def open_global_config():
@@ -567,6 +1534,61 @@ def index() -> None:
                             "the same config directory.",
                             type="warning",
                         )
+
+                def _load_text_file_in_editor(
+                    target: Path,
+                    label: str,
+                    create_if_missing: bool = False,
+                    default_content: str = "",
+                ) -> None:
+                    if not target.exists():
+                        if not create_if_missing:
+                            ui.notify(f"{label} not found at: {target}", type="warning")
+                            return
+                        try:
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            target.write_text(default_content, encoding="utf-8")
+                        except OSError as exc:
+                            ui.notify(f"Could not create {target}: {exc}", type="negative")
+                            return
+                    try:
+                        content = target.read_text(encoding="utf-8")
+                    except OSError as exc:
+                        ui.notify(f"Could not read {target}: {exc}", type="negative")
+                        return
+
+                    editor.set_value(content)
+                    file_input.set_value(str(target))
+                    _update_editor_filepath(str(target))
+                    ui.notify(f"Loaded {label}: {target}", type="positive")
+
+                def _resolve_named_file(
+                    root: Path,
+                    name: str,
+                    fallback_suffix: str,
+                ) -> Path:
+                    raw = (name or "").strip()
+                    if not raw:
+                        return root / f"default{fallback_suffix}"
+
+                    candidate = Path(raw)
+                    if candidate.suffix:
+                        return root / candidate.name
+
+                    for suffix in [
+                        ".toml",
+                        ".ini",
+                        ".yaml",
+                        ".yml",
+                        ".json",
+                        ".txt",
+                        ".md",
+                    ]:
+                        path = root / f"{raw}{suffix}"
+                        if path.exists():
+                            return path
+
+                    return root / f"{raw}{fallback_suffix}"
 
                 # Project config (3dmake.toml) — load into editor
                 async def open_project_config():
@@ -603,9 +1625,7 @@ def index() -> None:
                 # 3dm path override dialog
                 def open_path_dialog():
                     with ui.dialog() as dlg, ui.card().classes("w-96"):
-                        ui.label("Set 3dm Binary Path").classes(
-                            "text-base font-semibold mb-2"
-                        )
+                        ui.label("Set 3dm Binary Path").classes("text-base font-semibold mb-2")
                         ui.label(
                             "Override the path to the 3dm binary file or folder. "
                             "This sets the THREE_DM_PATH environment variable "
@@ -640,37 +1660,157 @@ def index() -> None:
                                 )
 
                         with ui.row().classes("gap-2 mt-2"):
-                            ui.button("Apply", on_click=apply_path).props(
-                                "color=primary size=sm"
-                            )
-                            ui.button("Cancel", on_click=dlg.close).props(
-                                "flat size=sm"
-                            )
+                            ui.button("Apply", on_click=apply_path).props("color=primary size=sm")
+                            ui.button("Cancel", on_click=dlg.close).props("flat size=sm")
                     dlg.open()
 
-                with ui.grid(columns=2).classes("w-full gap-2"):
+                def open_self_update_confirm() -> None:
+                    with ui.dialog() as dlg, ui.card().classes("w-[28rem]"):
+                        ui.label("Confirm self update").classes("text-base font-semibold")
+                        ui.label("This will overwrite the 3dm binary. Continue?").classes("text-xs text-gray-500")
+
+                        async def _run_self_update() -> None:
+                            await _run_settings_command("3dm self-update")
+                            dlg.close()
+
+                        with ui.row().classes("gap-2 mt-2"):
+                            ui.button(
+                                "Continue",
+                                on_click=_run_self_update,
+                            ).props('color=primary size=sm aria-label="Run 3dm self-update"')
+                            ui.button("Cancel", on_click=dlg.close).props("flat size=sm")
+                    dlg.open()
+
+                def open_edit_overlay_dialog() -> None:
+                    with ui.dialog() as dlg, ui.card().classes("w-[28rem]"):
+                        ui.label("Edit Overlay").classes("text-base font-semibold")
+                        overlay_name = ui.input(
+                            label="Overlay name",
+                            placeholder="supports",
+                        ).classes("w-full")
+
+                        def _run_overlay() -> None:
+                            value = (overlay_name.value or "").strip()
+                            if not value:
+                                ui.notify("Enter an overlay name first.", type="warning")
+                                return
+                            config_dir = get_3dmake_config_dir()
+                            overlay_dir = config_dir / "overlays"
+                            target = _resolve_named_file(overlay_dir, value, ".ini")
+                            if not target.exists():
+                                target.parent.mkdir(parents=True, exist_ok=True)
+                                target.write_text(
+                                    "# 3dmake overlay\n# Add slicer override values here.\n",
+                                    encoding="utf-8",
+                                )
+                            _load_text_file_in_editor(target, "overlay")
+                            dlg.close()
+
+                        with ui.row().classes("gap-2 mt-2"):
+                            ui.button("Open", on_click=_run_overlay).props(
+                                'color=primary size=sm aria-label="Edit slicer overlay: runs 3dm edit-overlay"'
+                            )
+                            ui.button("Cancel", on_click=dlg.close).props("flat size=sm")
+                    dlg.open()
+
+                def _settings_click(cmd: str, needs_project: bool = False):
+                    async def _handler() -> None:
+                        await _run_settings_command(cmd, needs_project=needs_project)
+
+                    return _handler
+
+                with ui.grid(columns=3).classes("w-full gap-2"):
+                    setup_btn_ref[0] = (
+                        ui.button("Run Setup", on_click=open_setup_dialog)
+                        .tooltip("Run 3dm setup to configure 3DMake for the first time")
+                        .props('size=sm aria-label="Run 3dm setup: first-time configuration wizard"')
+                        .classes("w-full")
+                    )
                     ui.button("Global Config", on_click=open_global_config).tooltip(
                         "Load defaults.toml into the editor"
-                    ).props("size=sm").classes("w-full")
+                    ).props("size=sm aria-label='Open global defaults.toml in editor'").classes("w-full")
                     ui.button("Project Config", on_click=open_project_config).tooltip(
                         "Load this project's 3dmake.toml into the editor"
-                    ).props("size=sm").classes("w-full")
+                    ).props("size=sm aria-label='Open project 3dmake.toml in editor'").classes("w-full")
                     ui.button("Set 3dm Path", on_click=open_path_dialog).tooltip(
                         "Override the path to the 3dm binary"
-                    ).props("size=sm").classes("w-full")
-                    ui.button("List Libraries", on_click=lambda: None).tooltip(
+                    ).props("size=sm aria-label='Set 3dm binary path override'").classes("w-full")
+                    ui.button("List Libraries", on_click=_settings_click("3dm list-libraries")).tooltip(
                         "Run 3dm list-libraries"
-                    ).props("size=sm").classes("w-full").on(
-                        "click",
-                        lambda: asyncio.create_task(
-                            _stream_command(
-                                f'"{_3dm_path}" list-libraries'
-                                if _3dm_path
-                                else "3dm list-libraries",
-                                output_log,
-                            )
-                        ),
+                    ).props("size=sm aria-label='List libraries: runs 3dm list-libraries'").classes("w-full")
+                    ui.button(
+                        "Install Libraries",
+                        on_click=_settings_click("3dm install-libraries", needs_project=True),
+                    ).tooltip("Download libraries listed in 3dmake.toml").props(
+                        'size=sm aria-label="Install libraries: runs 3dm install-libraries"'
+                    ).classes(
+                        "w-full"
                     )
+                    ui.button(
+                        "List Profiles",
+                        on_click=_settings_click("3dm list-profiles"),
+                    ).tooltip(
+                        "List available slicer printer profiles"
+                    ).props('size=sm aria-label="List printer profiles: runs 3dm list-profiles"').classes("w-full")
+                    ui.button(
+                        "List Overlays",
+                        on_click=_settings_click("3dm list-overlays"),
+                    ).tooltip(
+                        "List available slicer overlays"
+                    ).props('size=sm aria-label="List slicer overlays: runs 3dm list-overlays"').classes("w-full")
+                    ui.button(
+                        "Version Info",
+                        on_click=_settings_click("3dm version"),
+                    ).tooltip(
+                        "Show 3dmake version and config directory"
+                    ).props('size=sm aria-label="Version info: runs 3dm version"').classes("w-full")
+                    ui.button("Self Update", on_click=open_self_update_confirm).tooltip(
+                        "Update the 3dm binary to the latest version"
+                    ).props('size=sm aria-label="Self update: runs 3dm self-update"').classes("w-full")
+                    ui.button(
+                        "3dm Help",
+                        on_click=_settings_click("3dm help"),
+                    ).tooltip(
+                        "Show 3dmake CLI help text in the output log"
+                    ).props('size=sm aria-label="CLI help: runs 3dm help"').classes("w-full")
+                    ui.button("Edit Overlay", on_click=open_edit_overlay_dialog).props(
+                        'size=sm aria-label="Edit slicer overlay: runs 3dm edit-overlay"'
+                    ).classes("w-full")
+                    ui.button(
+                        "Edit Profile",
+                        on_click=lambda: _load_text_file_in_editor(
+                            _resolve_named_file(
+                                get_3dmake_config_dir() / "profiles",
+                                (_opt_profile.value or "").strip() or "default",
+                                ".ini",
+                            ),
+                            "profile",
+                            create_if_missing=True,
+                            default_content="# 3dmake printer profile\n",
+                        ),
+                    ).props('size=sm aria-label="Edit printer profile: runs 3dm edit-profile"').classes("w-full")
+                    ui.button(
+                        "Edit AI Prompt",
+                        on_click=lambda: _load_text_file_in_editor(
+                            next(
+                                (
+                                    p
+                                    for p in [
+                                        get_3dmake_config_dir() / "prompt.txt",
+                                        get_3dmake_config_dir() / "ai_prompt.txt",
+                                        get_3dmake_config_dir() / "ai-prompt.txt",
+                                        get_3dmake_config_dir() / "prompts" / "describe_prompt.txt",
+                                        get_3dmake_config_dir() / "prompts" / "prompt.txt",
+                                    ]
+                                    if p.exists()
+                                ),
+                                get_3dmake_config_dir() / "prompt.txt",
+                            ),
+                            "AI prompt",
+                            create_if_missing=True,
+                            default_content="# 3dmake AI description prompt\n",
+                        ),
+                    ).props('size=sm aria-label="Edit AI description prompt: runs 3dm edit-prompt"').classes("w-full")
 
         # ── RIGHT PANEL ───────────────────────────────────────────────────────
         with ui.column().classes("right-panel"):
@@ -1282,21 +2422,15 @@ def index() -> None:
                 return None  # leave language unchanged for other file types
 
             # 3. Editor card ───────────────────────────────────────────────────
-            with (
-                ui.card()
-                .classes("editor-card")
-                .props('id="section-editor" aria-label="Model editor"')
-            ):
+            with ui.card().classes("editor-card").props('id="section-editor" aria-label="Model editor" role="region"'):
                 with (
-                    ui.row()
-                    .classes("w-full items-center justify-between")
-                    .style("flex-shrink: 0; margin-bottom: 6px;")
+                    ui.row().classes("w-full items-center justify-between").style("flex-shrink: 0; margin-bottom: 6px;")
                 ):
                     with ui.row().classes("items-center gap-3"):
                         ui.label("Model Editor").classes("text-base font-semibold")
-                        _editor_path_label_ref[0] = ui.label(
-                            "Filepath: No Project Slected"
-                        ).classes("text-xs text-gray-400 font-mono")
+                        _editor_path_label_ref[0] = ui.label("Filepath: No Project Slected").classes(
+                            "text-xs text-gray-400 font-mono"
+                        )
                     with ui.row().classes("gap-2 items-center"):
 
                         async def load_into_editor():
@@ -1315,9 +2449,7 @@ def index() -> None:
                                 ui.notify(f"Could not load: {exc}", type="negative")
 
                         async def _browse_to_input(target: ui.input) -> None:
-                            selected = _pick_directory_native(
-                                target.value.strip() or str(Path.home())
-                            )
+                            selected = _pick_directory_native(target.value.strip() or str(Path.home()))
                             if selected:
                                 target.set_value(selected)
                             else:
@@ -1340,9 +2472,7 @@ def index() -> None:
 
                         def _open_new_project_dialog(parent_dialog: ui.dialog) -> None:
                             with ui.dialog() as dlg, ui.card().classes("w-[34rem]"):
-                                ui.label("Create New Project").classes(
-                                    "text-base font-semibold"
-                                )
+                                ui.label("Create New Project").classes("text-base font-semibold")
                                 ui.label(
                                     "Choose where to create the project. The app will "
                                     "create build/, src/, and 3dmake.toml."
@@ -1353,11 +2483,13 @@ def index() -> None:
                                     value=str(Path.home()),
                                     placeholder="/home/user/projects",
                                 ).classes("w-full")
+
+                                async def _browse_location() -> None:
+                                    await _browse_to_input(location_input)
+
                                 ui.button(
                                     "Browse…",
-                                    on_click=lambda: asyncio.create_task(
-                                        _browse_to_input(location_input)
-                                    ),
+                                    on_click=_browse_location,
                                 ).props("outline size=sm")
 
                                 project_name_input = ui.input(
@@ -1395,19 +2527,15 @@ def index() -> None:
                                         )
 
                                 with ui.row().classes("gap-2 mt-2"):
-                                    ui.button("Create & Save", on_click=create_and_save).props(
-                                        "color=primary size=sm"
-                                    )
-                                    ui.button("Cancel", on_click=dlg.close).props(
-                                        "flat size=sm"
-                                    )
+                                    ui.button("Create & Save", on_click=create_and_save).props("color=primary size=sm")
+                                    ui.button("Cancel", on_click=dlg.close).props("flat size=sm")
                             dlg.open()
 
-                        def _open_existing_project_dialog(parent_dialog: ui.dialog) -> None:
+                        def _open_existing_project_dialog(
+                            parent_dialog: ui.dialog,
+                        ) -> None:
                             with ui.dialog() as dlg, ui.card().classes("w-[34rem]"):
-                                ui.label("Use Existing Project").classes(
-                                    "text-base font-semibold"
-                                )
+                                ui.label("Use Existing Project").classes("text-base font-semibold")
                                 ui.label(
                                     "Select an existing project folder. Missing build/, "
                                     "src/, or 3dmake.toml will be created automatically."
@@ -1417,11 +2545,13 @@ def index() -> None:
                                     label="Project folder",
                                     placeholder="/home/user/projects/my-model-project",
                                 ).classes("w-full")
+
+                                async def _browse_existing() -> None:
+                                    await _browse_to_input(existing_input)
+
                                 ui.button(
                                     "Select Existing…",
-                                    on_click=lambda: asyncio.create_task(
-                                        _browse_to_input(existing_input)
-                                    ),
+                                    on_click=_browse_existing,
                                 ).props("outline size=sm")
 
                                 default_name = "model.scad"
@@ -1477,16 +2607,12 @@ def index() -> None:
                                         "Use Existing & Save",
                                         on_click=use_existing_and_save,
                                     ).props("color=primary size=sm")
-                                    ui.button("Cancel", on_click=dlg.close).props(
-                                        "flat size=sm"
-                                    )
+                                    ui.button("Cancel", on_click=dlg.close).props("flat size=sm")
                             dlg.open()
 
                         def _open_first_save_prompt() -> None:
                             with ui.dialog() as dlg, ui.card().classes("w-[28rem]"):
-                                ui.label("Save Into a 3dmake Project").classes(
-                                    "text-base font-semibold"
-                                )
+                                ui.label("Save Into a 3dmake Project").classes("text-base font-semibold")
                                 ui.label(
                                     "No loaded project was detected. Choose New Project "
                                     "or Select Existing before saving."
@@ -1499,13 +2625,9 @@ def index() -> None:
                                     ).props("color=primary size=sm")
                                     ui.button(
                                         "Select Existing",
-                                        on_click=lambda: _open_existing_project_dialog(
-                                            dlg
-                                        ),
+                                        on_click=lambda: _open_existing_project_dialog(dlg),
                                     ).props("outline size=sm")
-                                    ui.button("Cancel", on_click=dlg.close).props(
-                                        "flat size=sm"
-                                    )
+                                    ui.button("Cancel", on_click=dlg.close).props("flat size=sm")
                             dlg.open()
 
                         async def save_editor():
@@ -1562,17 +2684,45 @@ def index() -> None:
                             _open_first_save_prompt()
 
                         ui.button("📂 Load", on_click=load_into_editor).props(
-                            "flat size=sm"
+                            'flat size=sm aria-label="Load file into editor"'
                         )
                         ui.button("💾 Save", on_click=save_editor).props(
-                            "outline size=sm"
+                            'outline size=sm aria-label="Save editor contents"'
                         )
+
+                        async def _open_toolbar_stl() -> None:
+                            await _open_stl_viewer(
+                                Path((file_input.value or "").strip()),
+                                _log_ref[0],
+                            )
+
+                        view_stl_btn = ui.button(
+                            "🔲 View STL",
+                            on_click=_open_toolbar_stl,
+                        ).props('flat size=sm aria-label="View STL file in 3D viewer"')
+                        view_stl_btn.set_visibility(False)
+
+                        def _toggle_view_stl_btn(e) -> None:
+                            value = (e.value or "").strip().lower()
+                            view_stl_btn.set_visibility(value.endswith(".stl"))
+
+                        file_input.on_value_change(_toggle_view_stl_btn)
 
                 editor = ui.codemirror(
                     value="// Edit your OpenSCAD model here\n\ncube([10, 10, 10]);\n",
                     language="C++",
                     theme=_DEFAULT_THEME,
                 ).classes("w-full font-mono text-sm")
+                _apply_word_wrap(_wrap_state["enabled"])
+                ui.run_javascript("""
+                    var cm = document.querySelector('#section-editor .cm-content');
+                    if (cm) {
+                      cm.setAttribute('aria-label', 'OpenSCAD model source editor');
+                      cm.setAttribute('aria-multiline', 'true');
+                      cm.setAttribute('aria-roledescription', 'code editor');
+                      cm.setAttribute('aria-description', 'Press Escape to exit the editor and return to toolbar. Tab key inserts indentation.');
+                    }
+                    """)
 
             # ── Wire theme select into the settings drawer ────────────────────
             # Now that THEMES, _theme_options, and editor all exist, we can
@@ -1584,7 +2734,7 @@ def index() -> None:
                         value=_DEFAULT_THEME_LABEL,
                         label="Theme",
                     )
-                    .props("outlined options-dense")
+                    .props('outlined options-dense aria-label="Editor and application color theme selector"')
                     .classes("w-full")
                 )
 
@@ -1596,7 +2746,11 @@ def index() -> None:
 
                 # Small colour swatches so users can preview before selecting
                 ui.label("Current theme preview:").classes("text-xs text-gray-400 mt-2")
-                with ui.row().classes("gap-1 flex-wrap mt-1") as _swatch_row:
+                with (
+                    ui.row()
+                    .classes("gap-1 flex-wrap mt-1 swatch-row")
+                    .props('aria-hidden="true" role="presentation"') as _swatch_row
+                ):
                     pass  # swatches injected by JS below
 
             # Apply default palette + render swatches on load
@@ -1613,13 +2767,10 @@ def index() -> None:
                     for lbl, _, _, pal in THEMES
                 ]
             )
+            ui.run_javascript(_swatch_js)
 
             # 4. Custom Command card ───────────────────────────────────────────
-            with (
-                ui.card()
-                .classes("cmd-card")
-                .props('id="section-cmd" aria-label="Custom command"')
-            ):
+            with ui.card().classes("cmd-card").props('id="section-cmd" aria-label="Custom command" role="region"'):
                 ui.label("Custom Command").classes("text-base font-semibold mb-1")
                 with ui.row().classes("w-full gap-2 items-end cmd-row"):
                     command_input = ui.input(
@@ -1634,29 +2785,28 @@ def index() -> None:
                             return
                         if _3dm_path and cmd.startswith("3dm "):
                             cmd = cmd.replace("3dm ", f'"{_3dm_path}" ', 1)
-                        await _stream_command(cmd, output_log)
+                        if _log_ref[0] is None:
+                            return
+                        await _stream_command(
+                            cmd,
+                            _log_ref[0],
+                            show_popup=True,
+                            popup_title="Custom Command Output",
+                            ui_container=_popup_host_ref[0],
+                        )
 
-                    ui.button("Run", on_click=execute_custom).props(
-                        "color=primary size=sm"
-                    ).classes("cmd-run-btn")
+                    ui.button("Run", on_click=execute_custom).props("color=primary size=sm").classes("cmd-run-btn")
 
             # 5. Output Log card ───────────────────────────────────────────────
-            with (
-                ui.card()
-                .classes("log-card")
-                .props('id="section-log" aria-label="Output log"')
-            ):
+            with ui.card().classes("log-card").props('id="section-log" aria-label="Output log" role="region"'):
                 with (
-                    ui.row()
-                    .classes("w-full items-center justify-between")
-                    .style("flex-shrink: 0; margin-bottom: 4px;")
+                    ui.row().classes("w-full items-center justify-between").style("flex-shrink: 0; margin-bottom: 4px;")
                 ):
                     ui.label("Output Log").classes("text-base font-semibold")
-                    ui.button("Clear", on_click=lambda: output_log.clear()).props(
-                        "flat size=sm"
-                    )
+                    ui.button("Clear", on_click=lambda: output_log.clear()).props("flat size=sm")
 
                 output_log = ui.log(max_lines=500).classes("w-full font-mono text-xs")
+                _log_ref[0] = output_log
                 if _3dm_path:
                     output_log.push(f"[info] 3dm binary found at: {_3dm_path}")
                 else:
@@ -1664,6 +2814,15 @@ def index() -> None:
                         "[warn] 3dm not found. Install from https://github.com/tdeck/3dmake "
                         "then set THREE_DM_PATH or add to PATH."
                     )
+
+                ui.run_javascript("""
+                    const logEl = document.querySelector('#section-log .nicegui-log');
+                    if (logEl) {
+                      logEl.setAttribute('role', 'log');
+                      logEl.setAttribute('aria-live', 'polite');
+                      logEl.setAttribute('aria-atomic', 'false');
+                    }
+                    """)
 
     # ── Accessibility: keyboard shortcuts + help dialog ───────────────────────
     # All shortcut logic lives in a single JS block so screen readers and
@@ -1693,7 +2852,7 @@ def index() -> None:
     </thead>
     <tbody>
       <tr><td style="padding:.35rem .6rem;"><kbd>F6</kbd></td>
-          <td style="padding:.35rem .6rem;">Move focus to the next named section (cycles: File → Quick Actions → Settings → Editor → Command → Log → header → repeat)</td></tr>
+          <td style="padding:.35rem .6rem;">Move focus to the next named section (cycles: File → Command Options → Quick Actions → Image Export → Settings → Editor → Command → Log → header → repeat)</td></tr>
       <tr><td style="padding:.35rem .6rem;"><kbd>Shift+F6</kbd></td>
           <td style="padding:.35rem .6rem;">Move focus to the previous named section</td></tr>
       <tr><td style="padding:.35rem .6rem;"><kbd>Escape</kbd></td>
@@ -1711,7 +2870,7 @@ def index() -> None:
       <tr><td style="padding:.35rem .6rem;"><kbd>Ctrl+Shift+S</kbd></td>
           <td style="padding:.35rem .6rem;">Open / close the Appearance settings drawer</td></tr>
       <tr><td style="padding:.35rem .6rem;"><kbd>Ctrl+S</kbd></td>
-          <td style="padding:.35rem .6rem;">Save the current editor content to disk</td></tr>
+          <td style="padding:.35rem .6rem;">Save the current editor content to disk from anywhere in the app</td></tr>
       <tr><td style="padding:.35rem .6rem;"><kbd>Ctrl+O</kbd></td>
           <td style="padding:.35rem .6rem;">Load the file at the current path into the editor</td></tr>
       <tr><td style="padding:.35rem .6rem;"><kbd>Enter</kbd> (in Command input)</td>
@@ -1747,7 +2906,9 @@ def index() -> None:
   // The header is included so F6 can reach the settings button.
   const SECTION_IDS = [
     'section-file',
+        'section-options',
     'section-quick',
+        'section-image',
     'section-settings',
     'section-editor',
     'section-cmd',
@@ -1920,15 +3081,10 @@ def index() -> None:
 
     // ── Ctrl+S  → save editor ────────────────────────────────────────────
     if (ctrl && !shift && key === 's') {
-      // Only intercept when focus is inside the editor card or editor itself
-      const inEditorCard = document.activeElement &&
-        document.activeElement.closest('#section-editor');
-      if (inEditorCard) {
-        e.preventDefault();
-        // Click the Save button in the editor toolbar
-        const saveBtn = document.querySelector('#section-editor button[title*="Save"], #section-editor button:last-of-type');
-        if (saveBtn) saveBtn.click();
-      }
+            e.preventDefault();
+            // Always attempt save with Ctrl+S.
+            const saveBtn = document.querySelector('#section-editor button[title*="Save"], #section-editor button:nth-of-type(2)');
+            if (saveBtn) saveBtn.click();
       return;
     }
 
@@ -1952,6 +3108,18 @@ def index() -> None:
     }
 
   }, false);
+
+    document.addEventListener('focusin', function(e) {
+        if (e.target && e.target.closest('.cm-editor')) {
+            var liveRegion = document.getElementById('a11y-live');
+            if (liveRegion) {
+                liveRegion.textContent = '';
+                requestAnimationFrame(function() {
+                    liveRegion.textContent = 'Code editor focused. Tab key inserts indentation. Press Escape to exit the editor.';
+                });
+            }
+        }
+    });
 
   // ── Announce page ready to screen readers ─────────────────────────────
   window.addEventListener('load', function() {
@@ -1981,8 +3149,50 @@ def index() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def main() -> None:
-    """Launch the GUI.  Called by the ``3dmake-gui`` console script."""
+def _build_cli_parser() -> argparse.ArgumentParser:
+    """Create the command-line parser for the GUI launcher.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Configured parser supporting help aliases and ``--version``.
+    """
+    parser = argparse.ArgumentParser(
+        prog="3dmake-gui",
+        description="Launch the 3DMake NiceGUI frontend.",
+        add_help=False,
+    )
+    parser.add_argument(
+        "-h",
+        "--help",
+        "--hrlp",
+        action="help",
+        help="show this help message and exit",
+    )
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="show the application version and exit",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Launch the NiceGUI application process.
+
+    Parameters
+    ----------
+    argv : list[str] or None, optional
+        Optional command-line arguments. When ``None``, uses
+        ``sys.argv[1:]``.
+    """
+    parser = _build_cli_parser()
+    args, _unknown = parser.parse_known_args(sys.argv[1:] if argv is None else argv)
+
+    if args.version:
+        print(__version__)
+        return
+
     ui.run(
         title="3DMake GUI Wrapper",
         port=8080,

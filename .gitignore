@@ -30,3 +30,38 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# AI
+audit_remediation_prompt.json
+.pytest_cache/
+.ruff_cache/
+# Docs output (generated)
+site/
+docs/_build/
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.pytype/
+.pyre/
+
+# Python packaging/build leftovers
+pip-wheel-metadata/
+*.egg
+MANIFEST
+
+# Local runtime files
+*.log
+*.tmp
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+*.local

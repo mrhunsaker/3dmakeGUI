@@ -4,23 +4,23 @@ build-backend = "hatchling.build"
 
 [project]
 name = "3dmake-gui-wrapper"
-version = "0.1.0"
+version = "2026.04.29"
 description = "A NiceGUI-based GUI wrapper for tdeck/3dmake, designed for accessibility and terminal-based execution."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 authors = [
-    {name = "Michael Hunsaker", email = "your.email@example.com"},
+    {name = "Michael Hunsaker, M.Ed., Ph.D.", email = "github@mail.hunsakerweb.com"},
 ]
-license = {text = "MIT"}
+license = {text = "Apache 2.0"}
 keywords = ["3dmake", "nicegui", "accessibility", "gui", "3d-modeling", "blind", "screenreader"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: OS Independent",
     "Topic :: Multimedia :: Graphics",
     "Topic :: Software Development :: User Interfaces",
@@ -35,25 +35,36 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+viewer = [
+    "trimesh>=4.0",
+]
 dev = [
     "black",
     "ruff",
     "pytest",
     "pytest-asyncio",
     "pyinstaller>=6.0",
+    "trimesh>=4.0",
 ]
 
 [project.scripts]
 # Creates a `3dmake-gui` command after `pip install` / `uv sync`
 3dmake-gui = "tdmake_gui_wrapper.app:main"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "black",
     "ruff",
     "pytest",
     "pytest-asyncio",
     "pyinstaller>=6.0",
+    "trimesh>=4.0",
+]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.25",
+    "pymdown-extensions>=10.8",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -62,11 +73,11 @@ dev-dependencies = [
 packages = ["src/tdmake_gui_wrapper"]
 
 [tool.black]
-line-length = 88
-target-version = ["py39"]
+line-length = 120
+target-version = ["py311"]
 
 [tool.ruff]
-line-length = 88
+line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "C4", "UP"]

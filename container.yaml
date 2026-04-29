@@ -1,0 +1,125 @@
+# Copyright 2026 Michael Ryan Hunsaker, M.Ed., Ph.D.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Podman Kubernetes-style container spec (podman play kube)
+# Usage:
+#   podman build -t 3dmake-gui-wrapper:2026.04.29 .
+#   podman play kube container.yaml
+#   podman play kube --down container.yaml   # stop and remove
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: 3dmake-gui
+  labels:
+    app: 3dmake-gui-wrapper
+    version: "2026.04.29"
+  annotations:
+    org.opencontainers.image.source: "https://github.com/mrhunsaker/3dmakeGUI"
+spec:
+  # Run all containers in the pod as non-root
+  securityContext:
+    runAsUser: 1001
+    runAsGroup: 1001
+    fsGroup: 1001
+
+  restartPolicy: Unless-Stopped
+
+  containers:
+    - name: 3dmake-gui
+      image: 3dmake-gui-wrapper:2026.04.29
+
+      # Resource limits – adjust to your host
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "250m"
+        limits:
+          memory: "1Gi"
+          cpu: "1000m"
+
+      ports:
+        - containerPort: 8080
+          hostPort: 8080
+          hostIP: 127.0.0.1 # bind only to localhost
+          protocol: TCP
+
+      env:
+        - name: NICEGUI_HOST
+          value: "0.0.0.0"
+        - name: NICEGUI_PORT
+          value: "8080"
+        - name: NICEGUI_RELOAD
+          value: "false"
+
+      volumeMounts:
+        - name: projects
+          mountPath: /home/appuser/projects
+        - name: settings
+          mountPath: /home/appuser/.config/3dmake-gui
+        - name: tmp
+          mountPath: /tmp
+
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+
+      livenessProbe:
+        httpGet:
+          path: /
+          port: 8080
+        initialDelaySeconds: 10
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 3
+
+      readinessProbe:
+        httpGet:
+          path: /
+          port: 8080
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 3
+
+  volumes:
+    # Named volumes managed by Podman.
+    # To use host directories instead, replace with:
+    #   hostPath:
+    #     path: /home/youruser/projects
+    - name: projects
+      persistentVolumeClaim:
+        claimName: 3dmake-gui-projects
+    - name: settings
+      persistentVolumeClaim:
+        claimName: 3dmake-gui-settings
+    - name: tmp
+      emptyDir:
+        medium: Memory
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: 3dmake-gui-projects
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: 3dmake-gui-settings
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi

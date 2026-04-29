@@ -39,6 +39,7 @@ hidden = (
         "socketio.async_namespace",
         "socketio.async_server",
         "webview",          # pywebview native window
+        "trimesh",
         "tdmake_gui_wrapper",
         "tdmake_gui_wrapper.app",
         "tdmake_gui_wrapper.core",
@@ -80,7 +81,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon="docs/icon.ico",  # ← uncomment and point at your .ico file
+    icon="docs/icon.ico",  # ← uncomment and point at your .ico file
 )
 
 coll = COLLECT(
