@@ -14,9 +14,6 @@ on:
 permissions:
   contents: write
 
-env:
-  RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
-
 jobs:
   build-linux:
     name: Build Linux Artifact
@@ -89,6 +86,39 @@ jobs:
     needs: [build-linux, build-windows]
 
     steps:
+      - name: Checkout (with tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RAW_TAG="${{ inputs.version }}"
+          else
+            RAW_TAG="${{ github.ref_name }}"
+          fi
+
+          if [[ "$RAW_TAG" != v* ]]; then
+            RAW_TAG="v$RAW_TAG"
+          fi
+
+          echo "RELEASE_TAG=$RAW_TAG" >> "$GITHUB_ENV"
+          echo "Resolved release tag: $RAW_TAG"
+
+      - name: Ensure release tag exists
+        shell: bash
+        run: |
+          git fetch --tags --force
+          if git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Tag $RELEASE_TAG already exists."
+          else
+            echo "Tag $RELEASE_TAG not found; creating it at $GITHUB_SHA"
+            git tag -a "$RELEASE_TAG" "$GITHUB_SHA" -m "Release $RELEASE_TAG"
+            git push origin "$RELEASE_TAG"
+          fi
+
       - name: Download linux archive
         uses: actions/download-artifact@v4
         with:
@@ -104,8 +134,9 @@ jobs:
       - name: Create GitHub release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.RELEASE_VERSION }}
-          name: Release ${{ env.RELEASE_VERSION }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Release ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: |
             release-assets/*.tar.gz
