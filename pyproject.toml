@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "3dmake-gui-wrapper"
-version = "2026.04.29"
+version = "026.5.5"
 description = "A NiceGUI-based GUI wrapper for tdeck/3dmake, designed for accessibility and terminal-based execution."
 readme = "README.md"
 requires-python = ">=3.11"

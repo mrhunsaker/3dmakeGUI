@@ -4,7 +4,7 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "3dmake-gui-wrapper"
-version = "2026.4.29"
+version = "26.5.5"
 source = { editable = "." }
 dependencies = [
     { name = "nicegui" },

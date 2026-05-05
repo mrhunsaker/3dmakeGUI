@@ -6,8 +6,9 @@ Default order:
 2. Lint / format checks
 3. Test suite
 4. Build docs (strict)
-5. Bump version
+5. Update version to today's date-based SemVer-like value
 6. Build PyInstaller binary
+7. Commit, tag, push, and trigger release workflow
 
 Use flags to skip steps when needed.
 """
@@ -15,10 +16,15 @@ Use flags to skip steps when needed.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
+
+PYPROJECT_PATH = Path("pyproject.toml")
+INIT_PATH = Path("src") / "tdmake_gui_wrapper" / "__init__.py"
 
 
 def run_step(command: list[str], repo_root: Path, env: dict[str, str]) -> None:
@@ -37,6 +43,19 @@ def run_step(command: list[str], repo_root: Path, env: dict[str, str]) -> None:
     subprocess.run(command, check=True, cwd=repo_root, env=env)
 
 
+def run_capture(command: list[str], repo_root: Path, env: dict[str, str]) -> str:
+    """Run a command and return stripped stdout text."""
+    result = subprocess.run(
+        command,
+        check=True,
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
 def ensure_repo_root(repo_root: Path) -> None:
     """Validate that required project files exist at the repository root.
 
@@ -50,7 +69,12 @@ def ensure_repo_root(repo_root: Path) -> None:
     SystemExit
         Raised when one or more required files are missing.
     """
-    required = ["pyproject.toml", "3dmake_gui.spec", "scripts/bump_version.py"]
+    required = [
+        "pyproject.toml",
+        "3dmake_gui.spec",
+        "scripts/bump_version.py",
+        ".github/workflows/release.yml",
+    ]
     missing = [entry for entry in required if not (repo_root / entry).exists()]
     if missing:
         joined = ", ".join(missing)
@@ -83,14 +107,117 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-bump",
         action="store_true",
-        help="Skip scripts/bump_version.py.",
+        help="Skip version update.",
     )
     parser.add_argument(
         "--no-pyinstaller",
         action="store_true",
         help="Skip PyInstaller build.",
     )
+    parser.add_argument(
+        "--no-release",
+        action="store_true",
+        help="Skip git commit/tag/push and workflow dispatch.",
+    )
+    parser.add_argument(
+        "--version",
+        dest="release_version",
+        type=str,
+        default=None,
+        help="Override date-based release version (without leading v).",
+    )
     return parser.parse_args()
+
+
+def date_based_version(today: dt.date | None = None) -> str:
+    """Return YYYY-date based SemVer-like version in YYY.M.D form.
+
+    Examples
+    --------
+    2026-05-05 -> ``026.5.5``
+    """
+    current = today or dt.date.today()
+    return f"{current.year % 1000:03d}.{current.month}.{current.day}"
+
+
+def normalize_version(version: str) -> str:
+    """Validate and normalize a release version string (no leading ``v``)."""
+    cleaned = version.strip()
+    if cleaned.startswith("v"):
+        cleaned = cleaned[1:]
+    if not re.fullmatch(r"\d{3}\.\d{1,2}\.\d{1,2}", cleaned):
+        raise SystemExit(
+            "Version must match YYY.M.D format (example: 026.5.5 or v026.5.5)."
+        )
+    return cleaned
+
+
+def update_version_files(repo_root: Path, version: str) -> None:
+    """Update version in pyproject.toml and src/tdmake_gui_wrapper/__init__.py."""
+    pyproject_file = repo_root / PYPROJECT_PATH
+    init_file = repo_root / INIT_PATH
+
+    py_text = pyproject_file.read_text(encoding="utf-8")
+    py_updated, py_count = re.subn(
+        r'^(version\s*=\s*)"[^"]+"\s*$',
+        rf'\1"{version}"',
+        py_text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if py_count != 1:
+        raise SystemExit("Could not update [project].version in pyproject.toml")
+    pyproject_file.write_text(py_updated, encoding="utf-8")
+
+    init_text = init_file.read_text(encoding="utf-8")
+    init_updated, init_count = re.subn(
+        r'^(__version__\s*=\s*)"[^"]+"\s*$',
+        rf'\1"{version}"',
+        init_text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if init_count != 1:
+        raise SystemExit("Could not update __version__ in src/tdmake_gui_wrapper/__init__.py")
+    init_file.write_text(init_updated, encoding="utf-8")
+
+
+def git_release(repo_root: Path, env: dict[str, str], tag: str) -> None:
+    """Commit, tag, push, and trigger release workflow."""
+    if shutil.which("git") is None:
+        raise SystemExit("Error: 'git' was not found in PATH.")
+
+    branch = run_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"], repo_root, env)
+    if branch == "HEAD":
+        raise SystemExit("Detached HEAD detected. Checkout a branch before running release.")
+
+    existing = run_capture(["git", "tag", "--list", tag], repo_root, env)
+    if existing == tag:
+        raise SystemExit(f"Tag {tag} already exists. Choose a new version.")
+
+    run_step(["git", "add", "-A"], repo_root, env)
+
+    status = run_capture(["git", "status", "--porcelain"], repo_root, env)
+    if status:
+        run_step(["git", "commit", "-m", f"release: {tag}"], repo_root, env)
+    else:
+        print("\nNo staged changes to commit; continuing with tag/push.")
+
+    run_step(["git", "tag", "-a", tag, "-m", f"Release {tag}"], repo_root, env)
+    run_step(["git", "push", "origin", branch], repo_root, env)
+    run_step(["git", "push", "origin", tag], repo_root, env)
+
+    if shutil.which("gh") is not None:
+        run_step(
+            ["gh", "workflow", "run", "release.yml", "-f", f"version={tag}"],
+            repo_root,
+            env,
+        )
+    else:
+        print(
+            "\nNote: GitHub CLI not found; skipped explicit workflow dispatch. "
+            "Tag push already triggers .github/workflows/release.yml."
+        )
 
 
 def main() -> int:
@@ -151,8 +278,12 @@ def main() -> int:
             ]
         )
 
+    release_version = normalize_version(args.release_version) if args.release_version else date_based_version()
+    release_tag = f"v{release_version}"
+
     if not args.no_bump:
-        steps.append(["uv", "run", "python", "scripts/bump_version.py"])
+        print(f"\nUpdating version files to {release_version}")
+        update_version_files(repo_root, release_version)
 
     if not args.no_pyinstaller:
         steps.append(["uv", "run", "pyinstaller", "3dmake_gui.spec"])
@@ -160,6 +291,10 @@ def main() -> int:
     print("Running update workflow from:", repo_root)
     for command in steps:
         run_step(command, repo_root=repo_root, env=repo_env)
+
+    if not args.no_release:
+        print(f"\nPreparing release commit and tag: {release_tag}")
+        git_release(repo_root, repo_env, release_tag)
 
     print("\nWorkflow completed successfully.")
     return 0
