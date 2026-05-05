@@ -17,10 +17,14 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import re
 import shutil
 import subprocess
+import time
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 from pathlib import Path
 
 PYPROJECT_PATH = Path("pyproject.toml")
@@ -54,6 +58,142 @@ def run_capture(command: list[str], repo_root: Path, env: dict[str, str]) -> str
         text=True,
     )
     return result.stdout.strip()
+
+
+def parse_repo_from_remote(remote_url: str) -> tuple[str, str] | None:
+    """Parse ``owner/repo`` from a GitHub origin URL."""
+    text = remote_url.strip()
+    match = re.search(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", text)
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _find_matching_run(runs: list[dict], head_sha: str) -> dict | None:
+    """Pick the most relevant release workflow run for the pushed tag SHA."""
+    for run in runs:
+        if run.get("head_sha") == head_sha and run.get("event") in {"push", "workflow_dispatch"}:
+            return run
+    for run in runs:
+        if run.get("event") in {"push", "workflow_dispatch"}:
+            return run
+    return None
+
+
+def fetch_release_run_via_gh(repo_root: Path, env: dict[str, str], head_sha: str) -> dict | None:
+    """Try to retrieve workflow run metadata using the GitHub CLI."""
+    if shutil.which("gh") is None:
+        return None
+
+    output = run_capture(
+        [
+            "gh",
+            "run",
+            "list",
+            "--workflow",
+            "release.yml",
+            "--json",
+            "url,status,conclusion,headSha,event,displayTitle,createdAt",
+            "--limit",
+            "25",
+        ],
+        repo_root,
+        env,
+    )
+    rows = json.loads(output) if output else []
+    normalized = [
+        {
+            "html_url": row.get("url"),
+            "status": row.get("status"),
+            "conclusion": row.get("conclusion"),
+            "head_sha": row.get("headSha"),
+            "event": row.get("event"),
+            "display_title": row.get("displayTitle"),
+            "created_at": row.get("createdAt"),
+        }
+        for row in rows
+    ]
+    return _find_matching_run(normalized, head_sha)
+
+
+def fetch_release_run_via_api(
+    repo_root: Path,
+    env: dict[str, str],
+    owner: str,
+    repo: str,
+    head_sha: str,
+) -> dict | None:
+    """Try to retrieve workflow run metadata using the public GitHub API."""
+    url = (
+        f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/release.yml/runs"
+        "?per_page=25"
+    )
+    req = Request(url)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "3dmakeGUI-update-system")
+    token = env.get("GITHUB_TOKEN")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+
+    with urlopen(req, timeout=20) as response:  # noqa: S310
+        payload = json.loads(response.read().decode("utf-8"))
+    runs = payload.get("workflow_runs", []) if isinstance(payload, dict) else []
+    normalized = [
+        {
+            "html_url": row.get("html_url"),
+            "status": row.get("status"),
+            "conclusion": row.get("conclusion"),
+            "head_sha": row.get("head_sha"),
+            "event": row.get("event"),
+            "display_title": row.get("display_title"),
+            "created_at": row.get("created_at"),
+        }
+        for row in runs
+    ]
+    return _find_matching_run(normalized, head_sha)
+
+
+def report_release_workflow_run(repo_root: Path, env: dict[str, str], tag: str) -> None:
+    """Poll and print the release workflow run URL/status after push."""
+    head_sha = run_capture(["git", "rev-list", "-n", "1", tag], repo_root, env)
+    remote_url = run_capture(["git", "config", "--get", "remote.origin.url"], repo_root, env)
+    parsed = parse_repo_from_remote(remote_url)
+    owner_repo = f"{parsed[0]}/{parsed[1]}" if parsed else None
+    fallback_actions_url = f"https://github.com/{owner_repo}/actions/workflows/release.yml" if owner_repo else None
+
+    print("\nLooking for release workflow run...")
+    timeout_sec = 180
+    start = time.time()
+    last_error = ""
+
+    while time.time() - start < timeout_sec:
+        run = None
+        try:
+            run = fetch_release_run_via_gh(repo_root, env, head_sha)
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            last_error = f"gh lookup failed: {exc}"
+
+        if run is None and parsed is not None:
+            try:
+                run = fetch_release_run_via_api(repo_root, env, parsed[0], parsed[1], head_sha)
+            except (OSError, URLError, json.JSONDecodeError) as exc:
+                last_error = f"API lookup failed: {exc}"
+
+        if run is not None:
+            print("Release workflow run detected:")
+            print(f"  URL: {run.get('html_url')}")
+            print(f"  Event: {run.get('event')}")
+            print(f"  Status: {run.get('status')}")
+            print(f"  Conclusion: {run.get('conclusion')}")
+            return
+
+        time.sleep(5)
+
+    if fallback_actions_url:
+        print("No matching release run found within 180s.")
+        print(f"Check manually: {fallback_actions_url}")
+    elif last_error:
+        print(f"No matching release run found within 180s ({last_error}).")
 
 
 def ensure_repo_root(repo_root: Path) -> None:
@@ -218,6 +358,8 @@ def git_release(repo_root: Path, env: dict[str, str], tag: str) -> None:
             "\nNote: GitHub CLI not found; skipped explicit workflow dispatch. "
             "Tag push already triggers .github/workflows/release.yml."
         )
+
+    report_release_workflow_run(repo_root, env, tag)
 
 
 def main() -> int:
