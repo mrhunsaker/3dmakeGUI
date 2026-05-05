@@ -78,10 +78,58 @@ target-version = ["py311"]
 
 [tool.ruff]
 line-length = 120
+target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "C4", "UP"]
-ignore = ["E501"]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "B",
+    "B9",
+    "C4",
+    "UP",
+    "N",
+    "RUF",
+    "SIM",
+    "PTH",
+    "TRY",
+    "ERA",
+    "PL",
+    "PERF",
+    "FBT",
+    "ARG",
+    "TCH",
+    "PIE",
+    "RSE",
+    "RET",
+    "ISC",
+]
+ignore = [
+    "E501",
+    "TRY003",
+    "FBT001",
+    "FBT002",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "N802",
+]
+unfixable = ["ERA"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tdmake_gui_wrapper"]
+force-sort-within-sections = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "ARG", "FBT"]
+
+[tool.ruff.lint.pylint]
+max-args = 10
+max-branches = 20
+max-returns = 8
+max-statements = 60
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
