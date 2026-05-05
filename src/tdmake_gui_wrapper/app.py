@@ -26,6 +26,7 @@ or (after installing the package):
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import html
 import json
@@ -35,7 +36,7 @@ import tomllib
 from pathlib import Path
 from time import perf_counter
 
-from nicegui import ui
+from nicegui import app, ui
 
 from . import __version__
 from .core import (
@@ -837,11 +838,39 @@ def index() -> None:
         else:
             ui.label("⚠ 3dm not found").classes("text-xs text-yellow-400")
 
-        # ⚙ Settings button — opens the right drawer
-        ui.button(icon="settings", on_click=lambda: settings_drawer.toggle()).props(
-            'flat round color=white aria-label="Open appearance settings (Ctrl+Shift+A)" '
-            'data-testid="settings-drawer-btn"'
-        ).tooltip("Appearance settings (theme & font size)")
+        def _open_shutdown_dialog() -> None:
+            with (
+                ui.dialog().props('aria-modal="true" aria-labelledby="shutdown-dlg-title"') as shutdown_dlg,
+                ui.card().classes("w-[28rem] max-w-[96vw]"),
+            ):
+                ui.label("Shut down 3DMake GUI?").props('id="shutdown-dlg-title"').classes("text-base font-semibold")
+                ui.label(
+                    "This safely stops the NiceGUI server and closes active sessions."
+                ).classes("text-xs text-gray-500")
+
+                def _confirm_shutdown() -> None:
+                    _notify("Shutting down 3DMake GUI...", toast_type="warning")
+                    shutdown_dlg.close()
+                    ui.timer(0.1, app.shutdown, once=True)
+
+                with ui.row().classes("gap-2 mt-2 justify-end"):
+                    ui.button("Shutdown", on_click=_confirm_shutdown).props(
+                        'color=negative size=sm aria-label="Confirm shutdown and stop the NiceGUI app"'
+                    )
+                    ui.button("Cancel", on_click=shutdown_dlg.close).props(
+                        'flat size=sm aria-label="Cancel shutdown"'
+                    )
+            shutdown_dlg.open()
+
+        with ui.row().classes("items-center gap-2"):
+            # ⚙ Settings button — opens the right drawer
+            ui.button(icon="settings", on_click=lambda: settings_drawer.toggle()).props(
+                'flat round color=white aria-label="Open appearance settings (Ctrl+Shift+A)" '
+                'data-testid="settings-drawer-btn"'
+            ).tooltip("Appearance settings (theme & font size)")
+            ui.button("Shutdown", icon="power_settings_new", on_click=_open_shutdown_dialog).props(
+                'outline color=negative size=sm aria-label="Safely shut down the NiceGUI application"'
+            ).tooltip("Stop the app safely")
 
     if packaged_dir is not None and _should_offer_path_install():
         with (
@@ -3648,14 +3677,18 @@ def main(argv: list[str] | None = None) -> None:
         print(__version__)
         return
 
-    ui.run(
-        title="3DMake GUI Wrapper",
-        port=8080,
-        reload=False,
-        show=True,
-        # native=True,  # ← uncomment to open in a standalone desktop window
-        #               #   (requires pywebview; good for PyInstaller builds)
-    )
+    try:
+        ui.run(
+            title="3DMake GUI Wrapper",
+            port=8080,
+            reload=False,
+            show=True,
+            # native=True,  # ← uncomment to open in a standalone desktop window
+            #               #   (requires pywebview; good for PyInstaller builds)
+        )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Graceful shutdown path (Ctrl+C or in-app shutdown).
+        return
 
 
 if __name__ == "__main__":
