@@ -25,13 +25,13 @@ This module centralizes platform-specific behavior used by the GUI layer:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 import os
+from pathlib import Path
 import shlex
 import shutil
 import subprocess
 import sys
-from collections.abc import AsyncIterator
-from pathlib import Path
 
 
 def get_packaged_executable_dir() -> Path | None:

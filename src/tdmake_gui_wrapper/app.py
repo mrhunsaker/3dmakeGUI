@@ -30,11 +30,11 @@ import asyncio
 import base64
 import html
 import json
+from pathlib import Path
 import re
 import sys
-import tomllib
-from pathlib import Path
 from time import perf_counter
+import tomllib
 
 from nicegui import app, ui
 
@@ -844,9 +844,9 @@ def index() -> None:
                 ui.card().classes("w-[28rem] max-w-[96vw]"),
             ):
                 ui.label("Shut down 3DMake GUI?").props('id="shutdown-dlg-title"').classes("text-base font-semibold")
-                ui.label(
-                    "This safely stops the NiceGUI server and closes active sessions."
-                ).classes("text-xs text-gray-500")
+                ui.label("This safely stops the NiceGUI server and closes active sessions.").classes(
+                    "text-xs text-gray-500"
+                )
 
                 def _confirm_shutdown() -> None:
                     _notify("Shutting down 3DMake GUI...", toast_type="warning")
@@ -857,9 +857,7 @@ def index() -> None:
                     ui.button("Shutdown", on_click=_confirm_shutdown).props(
                         'color=negative size=sm aria-label="Confirm shutdown and stop the NiceGUI app"'
                     )
-                    ui.button("Cancel", on_click=shutdown_dlg.close).props(
-                        'flat size=sm aria-label="Cancel shutdown"'
-                    )
+                    ui.button("Cancel", on_click=shutdown_dlg.close).props('flat size=sm aria-label="Cancel shutdown"')
             shutdown_dlg.open()
 
         with ui.row().classes("items-center gap-2"):
@@ -1227,11 +1225,11 @@ def index() -> None:
                     if root is None:
                         return
                     config = _read_project_config(root)
-                    if "image_size" in config and config["image_size"]:
+                    if config.get("image_size"):
                         image_size_input.set_value(str(config["image_size"]))
                     if "image_angles" in config and isinstance(config["image_angles"], list):
                         angle_select.set_value(config["image_angles"])
-                    if "colorscheme" in config and config["colorscheme"]:
+                    if config.get("colorscheme"):
                         colorscheme_select.set_value(str(config["colorscheme"]))
                     _announce("Project config loaded. Image settings updated.")
 
