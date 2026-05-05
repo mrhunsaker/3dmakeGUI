@@ -557,14 +557,14 @@ def main() -> int:
     ensure_windows_release_requirements(repo_root)
 
     steps: list[list[str]] = [
-        ["uv", "sync", "--all-extras"],
+        ["uv", "sync", "--all-extras", "--group", "dev"],
     ]
 
     if not args.no_checks:
         # Keep release automation usable by default while style debt is being
         # remediated. Use --full-lint to enforce the complete Ruff profile.
-        ruff_fix_cmd = ["uv", "run", "ruff", "check", "--fix", "src/"]
-        ruff_check_cmd = ["uv", "run", "ruff", "check", "src/"]
+        ruff_fix_cmd = ["uv", "run", "--group", "dev", "ruff", "check", "--fix", "src/"]
+        ruff_check_cmd = ["uv", "run", "--group", "dev", "ruff", "check", "src/"]
         if not args.full_lint:
             stable_select = "E,F,W,I,B,C4,UP"
             ruff_fix_cmd.extend(["--select", stable_select, "--ignore", "E501"])
@@ -572,14 +572,14 @@ def main() -> int:
 
         steps.append(ruff_fix_cmd)
         if not args.no_format:
-            steps.append(["uv", "run", "black", "src/", "tests/", "scripts/"])
+            steps.append(["uv", "run", "--group", "dev", "black", "src/", "tests/", "scripts/"])
         steps.extend(
             [
                 ruff_check_cmd,
-                ["uv", "run", "black", "--check", "src/", "tests/", "scripts/"],
-                ["uv", "run", "pytest", "-q"],
-                ["uv", "run", "pytest", "tests/test_core.py", "-q"],
-                ["uv", "run", "pytest", "tests/test_bump_version.py", "-q"],
+                ["uv", "run", "--group", "dev", "black", "--check", "src/", "tests/", "scripts/"],
+                ["uv", "run", "--group", "dev", "python", "-m", "pytest", "-q"],
+                ["uv", "run", "--group", "dev", "python", "-m", "pytest", "tests/test_core.py", "-q"],
+                ["uv", "run", "--group", "dev", "python", "-m", "pytest", "tests/test_bump_version.py", "-q"],
             ]
         )
 
@@ -599,7 +599,7 @@ def main() -> int:
         update_version_files(repo_root, release_version)
 
     if not args.no_pyinstaller:
-        steps.append(["uv", "run", "pyinstaller", "3dmake_gui.spec"])
+        steps.append(["uv", "run", "--group", "dev", "python", "-m", "PyInstaller", "3dmake_gui.spec"])
 
     print("Running update workflow from:", repo_root)
     for command in steps:
