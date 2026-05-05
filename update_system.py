@@ -23,7 +23,7 @@ import re
 import shutil
 import subprocess
 import time
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from pathlib import Path
 
@@ -223,6 +223,48 @@ def ensure_repo_root(repo_root: Path) -> None:
         )
 
 
+def ensure_windows_release_requirements(repo_root: Path) -> None:
+    """Validate required assets and workflow settings for Windows releases."""
+    required_paths = [
+        Path("docs/icon.ico"),
+        Path("docs/icon.png"),
+        Path("src/tdmake_gui_wrapper/__main__.py"),
+        Path("3dmake_gui.spec"),
+        Path(".github/workflows/release.yml"),
+    ]
+    missing = [str(path) for path in required_paths if not (repo_root / path).exists()]
+    if missing:
+        raise SystemExit(
+            "Windows release prerequisites are missing: " + ", ".join(missing)
+        )
+
+    spec_text = (repo_root / "3dmake_gui.spec").read_text(encoding="utf-8")
+    icon_match = re.search(r'icon\s*=\s*["\']([^"\']+)["\']', spec_text)
+    if not icon_match:
+        raise SystemExit(
+            "3dmake_gui.spec does not define an icon=... value required for Windows builds."
+        )
+
+    icon_path = Path(icon_match.group(1))
+    if icon_path.suffix.lower() != ".ico":
+        raise SystemExit(
+            f"PyInstaller icon must be .ico for Windows, found: {icon_path}"
+        )
+    if not (repo_root / icon_path).exists():
+        raise SystemExit(
+            f"PyInstaller icon path in 3dmake_gui.spec does not exist: {icon_path}"
+        )
+
+    workflow_text = (repo_root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    required_markers = ["build-windows:", "runs-on: windows-latest", "windows-archive"]
+    absent = [marker for marker in required_markers if marker not in workflow_text]
+    if absent:
+        raise SystemExit(
+            "Release workflow is missing required Windows release settings: "
+            + ", ".join(absent)
+        )
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line options for the update workflow.
 
@@ -357,6 +399,8 @@ def git_release(repo_root: Path, env: dict[str, str], tag: str) -> None:
     run_step(["git", "push", "origin", branch], repo_root, env)
     run_step(["git", "push", "origin", tag], repo_root, env)
 
+    ensure_github_release_exists(repo_root, env, tag)
+
     if shutil.which("gh") is not None:
         run_step(
             ["gh", "workflow", "run", "release.yml", "-f", f"version={tag}"],
@@ -370,6 +414,111 @@ def git_release(repo_root: Path, env: dict[str, str], tag: str) -> None:
         )
 
     report_release_workflow_run(repo_root, env, tag)
+
+
+def _release_exists_via_api(owner: str, repo: str, tag: str, env: dict[str, str]) -> bool:
+    """Return True when a GitHub release already exists for the given tag."""
+    url = f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
+    req = Request(url)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "3dmakeGUI-update-system")
+    token = env.get("GITHUB_TOKEN")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+
+    try:
+        with urlopen(req, timeout=20) as response:  # noqa: S310
+            _ = response.read()
+            return True
+    except HTTPError as exc:
+        if exc.code == 404:
+            return False
+        raise
+
+
+def _create_release_via_api(owner: str, repo: str, tag: str, env: dict[str, str]) -> bool:
+    """Create a GitHub release using API when ``gh`` is unavailable."""
+    token = env.get("GITHUB_TOKEN")
+    if not token:
+        return False
+
+    url = f"https://api.github.com/repos/{owner}/{repo}/releases"
+    payload = json.dumps(
+        {
+            "tag_name": tag,
+            "name": f"Release {tag}",
+            "generate_release_notes": True,
+            "draft": False,
+            "prerelease": False,
+        }
+    ).encode("utf-8")
+    req = Request(url, data=payload, method="POST")
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "3dmakeGUI-update-system")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+
+    try:
+        with urlopen(req, timeout=20) as response:  # noqa: S310
+            _ = response.read()
+            return response.status in {200, 201}
+    except HTTPError as exc:
+        if exc.code == 422:
+            return True
+        raise
+
+
+def ensure_github_release_exists(repo_root: Path, env: dict[str, str], tag: str) -> None:
+    """Ensure a GitHub release exists for the tag that was just pushed."""
+    remote_url = run_capture(["git", "config", "--get", "remote.origin.url"], repo_root, env)
+    parsed = parse_repo_from_remote(remote_url)
+    owner_repo = f"{parsed[0]}/{parsed[1]}" if parsed else None
+
+    if shutil.which("gh") is not None:
+        try:
+            run_capture(["gh", "release", "view", tag, "--json", "url"], repo_root, env)
+            print(f"GitHub release already exists for {tag}.")
+            return
+        except subprocess.CalledProcessError:
+            pass
+
+        run_step(
+            [
+                "gh",
+                "release",
+                "create",
+                tag,
+                "--title",
+                f"Release {tag}",
+                "--generate-notes",
+                "--verify-tag",
+            ],
+            repo_root,
+            env,
+        )
+        return
+
+    if parsed is None:
+        print(
+            "Note: could not determine owner/repo from origin remote; "
+            "skipping explicit GitHub release creation."
+        )
+        return
+
+    exists = _release_exists_via_api(parsed[0], parsed[1], tag, env)
+    if exists:
+        print(f"GitHub release already exists for {tag}.")
+        return
+
+    created = _create_release_via_api(parsed[0], parsed[1], tag, env)
+    if created:
+        print(f"Created GitHub release for {tag} via API.")
+    elif owner_repo:
+        print(
+            "Note: could not create GitHub release automatically (gh not installed and "
+            "GITHUB_TOKEN missing)."
+        )
+        print(f"Create it manually at: https://github.com/{owner_repo}/releases/new?tag={tag}")
 
 
 def main() -> int:
@@ -404,6 +553,8 @@ def main() -> int:
             )
 
     args = parse_args()
+
+    ensure_windows_release_requirements(repo_root)
 
     steps: list[list[str]] = [
         ["uv", "sync", "--all-extras"],
