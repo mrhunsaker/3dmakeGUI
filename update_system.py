@@ -322,14 +322,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def date_based_version(today: dt.date | None = None) -> str:
-    """Return YYYY-date based SemVer-like version in YYY.M.D form.
+    """Return YYYY-date based SemVer-like version in YYYY.M.D form.
 
     Examples
     --------
-    2026-05-05 -> ``026.5.5``
+    2026-05-05 -> ``2026.5.5``
     """
     current = today or dt.date.today()
-    return f"{current.year % 1000:03d}.{current.month}.{current.day}"
+    return f"{current.year % 1000:04d}.{current.month}.{current.day}"
 
 
 def normalize_version(version: str) -> str:
@@ -337,9 +337,9 @@ def normalize_version(version: str) -> str:
     cleaned = version.strip()
     if cleaned.startswith("v"):
         cleaned = cleaned[1:]
-    if not re.fullmatch(r"\d{3}\.\d{1,2}\.\d{1,2}", cleaned):
+    if not re.fullmatch(r"\d{4}\.\d{1,2}\.\d{1,2}", cleaned):
         raise SystemExit(
-            "Version must match YYY.M.D format (example: 026.5.5 or v026.5.5)."
+            "Version must match YYYY.M.D format (example: 2026.5.5 or v2026.5.5)."
         )
     return cleaned
 
