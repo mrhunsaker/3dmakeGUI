@@ -402,11 +402,17 @@ def git_release(repo_root: Path, env: dict[str, str], tag: str) -> None:
     ensure_github_release_exists(repo_root, env, tag)
 
     if shutil.which("gh") is not None:
-        run_step(
-            ["gh", "workflow", "run", "release.yml", "-f", f"version={tag}"],
-            repo_root,
-            env,
-        )
+        try:
+            run_step(
+                ["gh", "workflow", "run", "release.yml", "-f", f"version={tag}"],
+                repo_root,
+                env,
+            )
+        except subprocess.CalledProcessError:
+            print(
+                "\nNote: could not dispatch release workflow via gh (likely unauthenticated). "
+                "Tag push already triggers .github/workflows/release.yml."
+            )
     else:
         print(
             "\nNote: GitHub CLI not found; skipped explicit workflow dispatch. "
@@ -482,21 +488,27 @@ def ensure_github_release_exists(repo_root: Path, env: dict[str, str], tag: str)
         except subprocess.CalledProcessError:
             pass
 
-        run_step(
-            [
-                "gh",
-                "release",
-                "create",
-                tag,
-                "--title",
-                f"Release {tag}",
-                "--generate-notes",
-                "--verify-tag",
-            ],
-            repo_root,
-            env,
-        )
-        return
+        try:
+            run_step(
+                [
+                    "gh",
+                    "release",
+                    "create",
+                    tag,
+                    "--title",
+                    f"Release {tag}",
+                    "--generate-notes",
+                    "--verify-tag",
+                ],
+                repo_root,
+                env,
+            )
+            return
+        except subprocess.CalledProcessError:
+            print(
+                "Note: gh is installed but release creation failed (likely unauthenticated). "
+                "Falling back to API/manual flow."
+            )
 
     if parsed is None:
         print(
