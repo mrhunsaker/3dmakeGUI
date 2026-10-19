@@ -1,6 +1,6 @@
 import os
-import sys
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -51,7 +51,7 @@ async def test_run_command_async_emits_done_return_code_on_failure():
 
 
 def test_run_command_sync_returns_stdout_stderr_and_code():
-    cmd = f'"{sys.executable}" -c "import sys; ' "print('hello'); " "print('oops', file=sys.stderr); " "sys.exit(0)" '"'
+    cmd = f"\"{sys.executable}\" -c \"import sys; print('hello'); print('oops', file=sys.stderr); sys.exit(0)\""
     stdout, stderr, code = run_command_sync(cmd)
 
     assert "hello" in stdout

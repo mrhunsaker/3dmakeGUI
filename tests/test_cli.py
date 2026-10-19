@@ -163,7 +163,9 @@ def test_custom_command_replaces_3dm_with_binary_and_validates():
 async def test_argv_reaches_binary_unmodified_without_shell(tmp_path: Path):
     log = tmp_path / "argv.txt"
     shim = tmp_path / "3dm"
-    shim.write_text(f"#!{sys.executable}\nimport sys, pathlib\npathlib.Path({str(log)!r}).write_text(chr(0).join(sys.argv[1:]))\n")
+    shim.write_text(
+        f"#!{sys.executable}\nimport sys, pathlib\npathlib.Path({str(log)!r}).write_text(chr(0).join(sys.argv[1:]))\n"
+    )
     shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
 
     tricky = "name with spaces; $(touch pwned) `id`"

@@ -28,8 +28,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import contextlib
 import html
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -67,6 +69,9 @@ from .core import (
 # ──────────────────────────────────────────────────────────────────────────────
 
 _current_file: Path | None = None
+
+# Tolerance used when deciding whether a scale value is effectively 1.0.
+_SCALE_EPSILON = 1e-9
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -389,7 +394,7 @@ async def _open_stl_viewer(
     stl_b64 = base64.b64encode(stl_path.read_bytes()).decode("ascii")
     dims_text = "Install trimesh for bounding box dimensions."
     try:
-        import trimesh
+        import trimesh  # noqa: PLC0415  # optional dependency, imported lazily
 
         mesh = trimesh.load(str(stl_path), force="mesh")
         bb = mesh.bounding_box.extents
@@ -742,7 +747,7 @@ def _pick_directory_native(initial_dir: str | None = None) -> str | None:
     # Prefer pywebview's native dialog when available; this matches the
     # host platform's file-picker look/scale better than Tk on HiDPI displays.
     try:
-        import webview
+        import webview  # noqa: PLC0415  # only needed for native dialogs
 
         if getattr(webview, "windows", None):
             selected = webview.windows[0].create_file_dialog(
@@ -756,8 +761,8 @@ def _pick_directory_native(initial_dir: str | None = None) -> str | None:
 
     # Fallback for non-native mode.
     try:
-        import tkinter as tk
-        from tkinter import filedialog
+        import tkinter as tk  # noqa: PLC0415  # GUI fallback only
+        from tkinter import filedialog  # noqa: PLC0415
     except (ImportError, ModuleNotFoundError):
         return None
 
@@ -769,10 +774,8 @@ def _pick_directory_native(initial_dir: str | None = None) -> str | None:
         root.tk.call("tk", "scaling", max(dpi / 72.0, 1.5))
     except (tk.TclError, ValueError):
         root.tk.call("tk", "scaling", 1.5)
-    try:
-        root.attributes("-topmost", True)
-    except tk.TclError:
-        pass
+    with contextlib.suppress(tk.TclError):
+        root.attributes("-topmost", True)  # noqa: FBT003
 
     try:
         chosen = filedialog.askdirectory(
@@ -841,8 +844,8 @@ def index() -> None:
     # ── Appearance state (font size + theme) ─────────────────────────────────
     _font_state = {"size": "medium"}  # "medium" | "large" | "xlarge"
     _wrap_state = {"enabled": bool(_gui_settings.get("editor_word_wrap", False))}
-    EDITOR_PX = {"medium": 14, "large": 17, "xlarge": 20}
-    FONT_SIZES = [
+    editor_px = {"medium": 14, "large": 17, "xlarge": 20}
+    font_sizes = [
         ("Medium", "medium"),
         ("Large", "large"),
         ("X-Large", "xlarge"),
@@ -862,13 +865,14 @@ def index() -> None:
             _notify("Opened in system terminal. This command needs keyboard input.", toast_type="positive")
         else:
             _notify(f"No supported terminal emulator found. Run manually: {text}", type="warning")
+
     # font radio buttons wired after the drawer is built
     _font_radio: list = [None]
 
     def _apply_font_size(size: str) -> None:
         """Toggle body font class and resize CodeMirror."""
         _font_state["size"] = size
-        px = EDITOR_PX[size]
+        px = editor_px[size]
         ui.run_javascript(f"""
             const b = document.body;
             b.classList.remove('font-medium', 'font-large', 'font-xlarge');
@@ -929,7 +933,7 @@ def index() -> None:
 
         with ui.row().classes("items-center gap-2"):
             # ⚙ Settings button — opens the right drawer
-            ui.button(icon="settings", on_click=lambda: settings_drawer.toggle()).props(
+            ui.button(icon="settings", on_click=lambda: settings_drawer.toggle()).props(  # noqa: PLW0108
                 'flat round color=white aria-label="Open appearance settings (Ctrl+Shift+A)" '
                 'data-testid="settings-drawer-btn"'
             ).tooltip("Appearance settings (theme & font size)")
@@ -972,7 +976,7 @@ def index() -> None:
 
     # ── Settings drawer (right side, opened by ⚙ button above) ───────────────
     # Declared here so the header button can reference it; content filled below
-    # after THEMES is defined in the right-panel block.
+    # after themes is defined in the right-panel block.
     with (
         ui.right_drawer(value=False, fixed=True, elevated=True)
         .classes("q-pa-md")
@@ -988,7 +992,7 @@ def index() -> None:
         ui.separator().classes("mb-2")
 
         font_radio = ui.radio(
-            {sz: lbl for lbl, sz in FONT_SIZES},
+            {sz: lbl for lbl, sz in font_sizes},
             value="medium",
             on_change=lambda e: _apply_font_size(e.value),
         ).props('color=primary aria-labelledby="font-size-heading"')
@@ -1005,7 +1009,7 @@ def index() -> None:
         ui.separator().classes("my-4")
 
         # ── Theme picker placeholder label ────────────────────────────────────
-        # The actual theme select is injected below after THEMES is defined,
+        # The actual theme select is injected below after themes is defined,
         # because we need the right-panel scope.  We use a column container
         # as the mount point.
         ui.label("Editor & App Theme").classes("text-sm font-semibold mb-1")
@@ -1015,16 +1019,15 @@ def index() -> None:
     # ── Layout constants (px) ─────────────────────────────────────────────────
     # Header and footer heights are set in the ui.header/footer calls above.
     # We hard-code the same values here so calc() can reference them.
-    HDR = 48  # px  – matches py-3 on the header
-    FTR = 32  # px  – matches py-2 on the footer
-    GAP = 12  # px  – gap between cards
-    PAD = 12  # px  – outer left/right/top padding
+    hdr = 48  # px - matches py-3 on the header
+    ftr = 32  # px - matches py-2 on the footer
+    gap = 12  # px - gap between cards
+    pad = 12  # px - outer left/right/top padding
     # Fixed right-column heights (px):
-    CMD_H = 104  # Custom Command card (default)
-    LOG_H = 200  # Output Log card
-    # Editor gets everything that's left:
-    # BODY_H = 100dvh - HDR - FTR
-    # EDITOR_H = BODY_H - CMD_H - LOG_H - 3*GAP - 2*PAD
+    cmd_h = 104  # Custom Command card (default)
+    log_h = 200  # Output Log card
+    # Editor gets everything that's left: full viewport height minus the
+    # header, footer, fixed cards, inter-card gaps, and outer padding.
 
     ui.add_head_html(f"""
     <style>
@@ -1034,14 +1037,14 @@ def index() -> None:
 
       /* ── layout shell ── */
       .app-body {{
-                --cmd-card-h: {CMD_H}px;
+                --cmd-card-h: {cmd_h}px;
         display: flex;
         flex-direction: row;
                 width: 100%;
                 max-width: 100%;
-        gap: {GAP}px;
-        padding: {PAD}px;
-        height: calc(100dvh - {HDR}px - {FTR}px);
+        gap: {gap}px;
+        padding: {pad}px;
+        height: calc(100dvh - {hdr}px - {ftr}px);
         overflow: hidden;
         box-sizing: border-box;
       }}
@@ -1053,7 +1056,7 @@ def index() -> None:
                 max-width: 420px;
         display: flex;
         flex-direction: column;
-        gap: {GAP}px;
+        gap: {gap}px;
         overflow-y: auto;
         overflow-x: hidden;
         flex-shrink: 0;
@@ -1072,7 +1075,7 @@ def index() -> None:
         min-width: 0;
         display: flex;
         flex-direction: column;
-        gap: {GAP}px;
+        gap: {gap}px;
         overflow: hidden;
         box-sizing: border-box;
       }}
@@ -1107,9 +1110,9 @@ def index() -> None:
         width: 100% !important;
         box-sizing: border-box;
         /* total right column height minus the two fixed cards and gaps */
-                height: calc(100dvh - {HDR}px - {FTR}px - var(--cmd-card-h) - {
-        LOG_H
-    }px - {3 * GAP}px - {2 * PAD}px);
+                height: calc(100dvh - {hdr}px - {ftr}px - var(--cmd-card-h) - {
+        log_h
+    }px - {3 * gap}px - {2 * pad}px);
         min-height: 200px;
       }}
       /* codemirror sits directly inside the card; give it all remaining space */
@@ -1124,9 +1127,9 @@ def index() -> None:
 
       /* ── log card: fixed height, inner log element fills it ── */
       .log-card {{
-        height: {LOG_H}px;
-        min-height: {LOG_H}px;
-        max-height: {LOG_H}px;
+        height: {log_h}px;
+        min-height: {log_h}px;
+        max-height: {log_h}px;
         width: 100% !important;
         box-sizing: border-box;
         display: flex;
@@ -1422,7 +1425,7 @@ def index() -> None:
                             view=_opt_view.value,
                             profile=_opt_profile.value,
                             overlays=[o.strip() for o in (_opt_overlay.value or "").split(",") if o.strip()],
-                            scale=None if abs(scale_val - 1.0) <= 1e-9 else str(scale_val),
+                            scale=None if abs(scale_val - 1.0) <= _SCALE_EPSILON else str(scale_val),
                             scale_x=_opt_scale_x.value,
                             scale_y=_opt_scale_y.value,
                             scale_z=_opt_scale_z.value,
@@ -1988,8 +1991,6 @@ def index() -> None:
                         ).classes("w-full")
 
                         def apply_path():
-                            import os
-
                             new_path = path_field.value.strip()
                             resolved_path = resolve_3dm_binary_path(new_path)
                             if resolved_path:
@@ -2043,7 +2044,9 @@ def index() -> None:
                             if not value:
                                 _notify("Enter an overlay name first.", toast_type="warning")
                                 return
-                            _launch_in_terminal_ui("3dm edit-overlay", Options(overlays=[value], profile=_opt_profile.value))
+                            _launch_in_terminal_ui(
+                                "3dm edit-overlay", Options(overlays=[value], profile=_opt_profile.value)
+                            )
                             dlg.close()
 
                         with ui.row().classes("gap-2 mt-2"):
@@ -2116,8 +2119,15 @@ def index() -> None:
                     ui.button("Edit Overlay", on_click=open_edit_overlay_dialog).props(
                         'size=sm aria-label="Edit slicer overlay: runs 3dm edit-overlay"'
                     ).classes("w-full")
-                    def _term_btn(label: str, cmd: str, tip: str, needs_proj: bool = False, with_profile: bool = False,
-                                  with_model: bool = False):
+
+                    def _term_btn(
+                        label: str,
+                        cmd: str,
+                        tip: str,
+                        needs_proj: bool = False,
+                        with_profile: bool = False,
+                        with_model: bool = False,
+                    ):
                         def _click() -> None:
                             if needs_proj and _project_root_from_input() is None:
                                 _notify("No 3dmake project found at that path. Run 3dm new first.", type="warning")
@@ -2132,16 +2142,33 @@ def index() -> None:
                             f'size=sm aria-label="{label}: runs {cmd} in a terminal"'
                         ).classes("w-full")
 
-                    _term_btn("Edit Profile", "3dm edit-profile", "Open the selected printer profile (-p) via 3dm",
-                              with_profile=True)
+                    _term_btn(
+                        "Edit Profile",
+                        "3dm edit-profile",
+                        "Open the selected printer profile (-p) via 3dm",
+                        with_profile=True,
+                    )
                     _term_btn("Edit AI Prompt", "3dm edit-prompt", "Edit the AI prompt used by 3dm info")
-                    _term_btn("Edit Model (3dm)", "3dm edit-model", "Open the model SCAD file (-m) via 3dm",
-                              needs_proj=True, with_model=True)
+                    _term_btn(
+                        "Edit Model (3dm)",
+                        "3dm edit-model",
+                        "Open the model SCAD file (-m) via 3dm",
+                        needs_proj=True,
+                        with_model=True,
+                    )
                     _term_btn("Edit Global Config (3dm)", "3dm edit-global-config", "Edit defaults.toml via 3dm")
-                    _term_btn("Clone Profile", "3dm clone-profile", "Clone a printer profile under a new name",
-                              with_profile=True)
-                    _term_btn("Edit Profile GCODE", "3dm edit-profile-gcode", "Edit GCODE scripts in a printer profile",
-                              with_profile=True)
+                    _term_btn(
+                        "Clone Profile",
+                        "3dm clone-profile",
+                        "Clone a printer profile under a new name",
+                        with_profile=True,
+                    )
+                    _term_btn(
+                        "Edit Profile GCODE",
+                        "3dm edit-profile-gcode",
+                        "Edit GCODE scripts in a printer profile",
+                        with_profile=True,
+                    )
                     ui.button("Test Connection", on_click=_settings_click("3dm test-connect")).tooltip(
                         "Test the connection to the configured printer (OctoPrint / Bambu)"
                     ).props('size=sm aria-label="Test printer connection: runs 3dm test-connect"').classes("w-full")
@@ -2353,7 +2380,7 @@ def index() -> None:
             # Site palette keys map to ui.colors() / ui.dark_mode() parameters.
             # Colors are extracted from each theme's published spec so the UI chrome
             # (cards, inputs, header, buttons) matches the editor visually.
-            THEMES: list[tuple[str, str, bool, dict]] = [
+            themes: list[tuple[str, str, bool, dict]] = [
                 # ── Dark / cozy ───────────────────────────────────────────────
                 (
                     "Tokyo Night",
@@ -2913,12 +2940,12 @@ def index() -> None:
             ]
 
             # Build lookup dicts
-            _theme_options = {label: tid for label, tid, *_ in THEMES}
-            _theme_is_dark = {label: dark for label, _, dark, *_ in THEMES}
-            _theme_palette = {label: pal for label, _, _2, pal in THEMES}
+            _theme_options = {label: tid for label, tid, *_ in themes}
+            _theme_is_dark = {label: dark for label, _, dark, *_ in themes}
+            _theme_palette = {label: pal for label, _, _2, pal in themes}
 
-            _DEFAULT_THEME_LABEL = "Dracula"
-            _DEFAULT_THEME = _theme_options[_DEFAULT_THEME_LABEL]
+            _default_theme_label = "Dracula"
+            _default_theme = _theme_options[_default_theme_label]
 
             # dark_mode element — lets us toggle Quasar dark mode at runtime
             dark_mode = ui.dark_mode(value=True)
@@ -2942,7 +2969,7 @@ def index() -> None:
                 """)
 
             # Apply default palette immediately on page load
-            _apply_site_theme(_DEFAULT_THEME_LABEL)
+            _apply_site_theme(_default_theme_label)
 
             def _detect_language(path: str) -> str | None:
                 """Return the codemirror language string for .toml and .scad files."""
@@ -3276,7 +3303,7 @@ def index() -> None:
                 editor = ui.codemirror(
                     value="// Edit your OpenSCAD model here\n\ncube([10, 10, 10]);\n",
                     language="C++",
-                    theme=_DEFAULT_THEME,
+                    theme=_default_theme,
                 ).classes("w-full font-mono text-sm")
                 _apply_word_wrap(_wrap_state["enabled"])
                 ui.run_javascript("""
@@ -3300,13 +3327,13 @@ def index() -> None:
                     """)
 
             # ── Wire theme select into the settings drawer ────────────────────
-            # Now that THEMES, _theme_options, and editor all exist, we can
+            # Now that themes, _theme_options, and editor all exist, we can
             # populate the _theme_mount container inside the drawer.
             with _theme_mount:
                 theme_select = (
                     ui.select(
                         options=_theme_options,
-                        value=_DEFAULT_THEME_LABEL,
+                        value=_default_theme_label,
                         label="Theme",
                     )
                     .props('outlined options-dense aria-label="Editor and application color theme selector"')
@@ -3331,7 +3358,7 @@ def index() -> None:
                     pass  # swatches injected by JS below
 
             # Apply default palette + render swatches on load
-            _apply_site_theme(_DEFAULT_THEME_LABEL)
+            _apply_site_theme(_default_theme_label)
             # Build preview swatches via JS after DOM settles
             _swatch_js = ";".join(
                 [
@@ -3341,7 +3368,7 @@ def index() -> None:
                     f"border-radius:3px;background:{pal['primary']};border:1px solid {pal['surface']};cursor:pointer;';"
                     f"s.setAttribute('data-theme-label','{lbl}');"
                     f"document.querySelector('.swatch-row')&&document.querySelector('.swatch-row').appendChild(s)}})()"
-                    for lbl, _, _, pal in THEMES
+                    for lbl, _, _, pal in themes
                 ]
             )
             ui.run_javascript(_swatch_js)
@@ -3388,7 +3415,7 @@ def index() -> None:
                     ui.row().classes("w-full items-center justify-between").style("flex-shrink: 0; margin-bottom: 4px;")
                 ):
                     ui.label("Output Log").classes("text-base font-semibold")
-                    ui.button("Clear", on_click=lambda: output_log.clear()).props("flat size=sm")
+                    ui.button("Clear", on_click=lambda: output_log.clear()).props("flat size=sm")  # noqa: PLW0108
 
                 _log_ref[0] = output_log
                 if _3dm_path_ref[0]:
@@ -3792,8 +3819,8 @@ def main(argv: list[str] | None = None) -> None:
             port=8080,
             reload=False,
             show=True,
-            # native=True,  # ← uncomment to open in a standalone desktop window
-            #               #   (requires pywebview; good for PyInstaller builds)
+            # Pass native=True to open in a standalone desktop window instead.
+            # This requires pywebview and works well for PyInstaller builds.
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
         # Graceful shutdown path (Ctrl+C or in-app shutdown).

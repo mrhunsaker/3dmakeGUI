@@ -1,7 +1,7 @@
-import importlib.util
-import sys
 from datetime import date
+import importlib.util
 from pathlib import Path
+import sys
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "bump_version.py"
 SPEC = importlib.util.spec_from_file_location("bump_version", MODULE_PATH)

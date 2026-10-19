@@ -52,7 +52,9 @@ def test_scaffold_with_real_3dm_new_yields_a_project_3dm_accepts(monkeypatch, tm
     assert (root / "src" / "main.scad").exists()  # only real `3dm new` creates the template model
 
     stl = Path(os.environ["THREEDM_E2E_SRC"]) / "test_fixtures" / "hexagon.stl"
-    res = subprocess.run([os.environ["THREEDM_E2E_BIN"], "info", str(stl)], cwd=root, capture_output=True, text=True, check=False)
+    res = subprocess.run(
+        [os.environ["THREEDM_E2E_BIN"], "info", str(stl)], cwd=root, capture_output=True, text=True, check=False
+    )
     assert res.returncode == 0, res.stdout + res.stderr
 
 

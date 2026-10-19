@@ -43,7 +43,9 @@ def test_every_global_flag_is_emitted_by_the_builder():
         interactive=True, copies=2, colorscheme="slicer_dark", image_size="1x1", debug=True,
     )  # fmt: skip
     emitted |= {t for t in cli.build_argv(["info"], opts) if t.startswith("-")}
-    emitted |= {t for t in cli.build_argv(["slice"], cli.Options(scale_x="1", scale_y="1", scale_z="1")) if t.startswith("-")}
+    emitted |= {
+        t for t in cli.build_argv(["slice"], cli.Options(scale_x="1", scale_y="1", scale_z="1")) if t.startswith("-")
+    }
     spec_flags = {tuple(o["flags"]) for o in cli.load_spec()["options"] if o["dest"] not in {"help", "h", "version"}}
     uncovered = [f for f in spec_flags if not (set(f) & emitted)]
     assert not uncovered, f"flags the GUI cannot emit: {uncovered}"

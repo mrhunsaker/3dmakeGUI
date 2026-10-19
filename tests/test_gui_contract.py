@@ -7,16 +7,23 @@ the GUI would hand to the operating system.
 
 from __future__ import annotations
 
-from pathlib import Path
+import asyncio
+from typing import TYPE_CHECKING
 
-import pytest
 from nicegui import ui
-from nicegui.testing import User
+from nicegui.testing.user_interaction import UserInteraction
+import pytest
 
 from tdmake_gui_wrapper import app as gui
 from tdmake_gui_wrapper import cli
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from nicegui.testing import User
+
 FAKE_BIN = "/fake/3dm"
+DEFAULT_CAMERA_ANGLES = 3
 
 
 @pytest.fixture
@@ -56,10 +63,6 @@ async def _open(user: User, rec) -> None:
 
 async def _click(user: User, label: str) -> None:
     """Click the one button whose text is exactly ``label`` (substring matches would be ambiguous)."""
-    import asyncio
-
-    from nicegui.testing.user_interaction import UserInteraction
-
     exact = [b for b in user.find(kind=ui.button).elements if getattr(b, "text", None) == label]
     assert len(exact) == 1, f"expected exactly one button labelled {label!r}, found {len(exact)}"
     UserInteraction(user, {exact[0]}, None).click()
@@ -152,7 +155,7 @@ async def test_image_export_runs_image_with_selected_options(user: User, rec):
     argv = rec["streamed"][-1]
     assert argv[0] == FAKE_BIN
     assert "image" in argv
-    assert argv.count("-a") == 3  # default three camera angles
+    assert argv.count("-a") == DEFAULT_CAMERA_ANGLES  # default three camera angles
     assert argv[argv.index("--colorscheme") + 1] == "slicer_dark"
     assert argv[argv.index("--image-size") + 1] == "1080x720"
     assert argv[-1] == str(rec["scad"])
@@ -164,7 +167,7 @@ async def test_info_can_use_image_settings(user: User, rec):
     switch.set_value(True)
     await _click(user, "Describe (Info)")
     argv = rec["streamed"][-1]
-    assert argv.count("-a") == 3
+    assert argv.count("-a") == DEFAULT_CAMERA_ANGLES
     assert "--colorscheme" in argv
     assert "--image-size" in argv
     assert argv[-2:] == ["info", str(rec["scad"])]

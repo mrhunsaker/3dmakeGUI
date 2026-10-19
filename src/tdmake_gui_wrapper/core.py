@@ -25,7 +25,6 @@ This module centralizes platform-specific behavior used by the GUI layer:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
 import os
 from pathlib import Path
 import shlex
@@ -35,7 +34,9 @@ import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
+
+_STREAM_COUNT = 2
 
 
 def get_packaged_executable_dir() -> Path | None:
@@ -76,9 +77,9 @@ def is_directory_on_path(target_dir: Path) -> bool:
         if not entry.strip():
             continue
         try:
-            candidate = Path(os.path.expanduser(entry)).resolve()
+            candidate = Path(entry).expanduser().resolve()
         except OSError:
-            candidate = Path(os.path.expanduser(entry))
+            candidate = Path(entry).expanduser()
         if candidate == target_resolved:
             return True
     return False
@@ -127,7 +128,7 @@ def _install_directory_to_windows_user_path(target_dir: Path) -> tuple[bool, str
         ``(success, message)`` describing the result.
     """
     try:
-        import winreg  # type: ignore
+        import winreg  # type: ignore  # noqa: PLC0415
     except ImportError:
         return False, "winreg is unavailable on this Python build."
 
@@ -243,7 +244,7 @@ def resolve_3dm_binary_path(path_value: str) -> str | None:
     if not path_value:
         return None
 
-    raw = os.path.expandvars(os.path.expanduser(path_value.strip()))
+    raw = os.path.expandvars(str(Path(path_value.strip()).expanduser()))
     if not raw:
         return None
 
@@ -309,8 +310,8 @@ def find_3dm_binary() -> str | None:
         Path("/Applications/3dmake/3dm"),
         Path("/Applications/3dmake/3dm.exe"),
         # Windows: %LOCALAPPDATA%\3dmake\3dm.exe
-        Path(os.environ.get("ProgramFiles", "")) / "3dmake" / "3dm.exe",
-        Path(os.environ.get("ProgramFiles(x86)", "")) / "3dmake" / "3dm.exe",
+        Path(os.environ.get("PROGRAMFILES", "")) / "3dmake" / "3dm.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "3dmake" / "3dm.exe",
         Path(os.environ.get("LOCALAPPDATA", "")) / "3dmake" / "3dm.exe",
     ]
     for candidate in candidates:
@@ -336,7 +337,7 @@ def get_3dmake_config_dir() -> Path:
     """
     env_dir = os.environ.get("THREEDMAKE_CONFIG_DIR")
     if env_dir:
-        return Path(os.path.expandvars(os.path.expanduser(env_dir))).resolve()
+        return Path(os.path.expandvars(str(Path(env_dir).expanduser()))).resolve()
 
     if sys.platform.startswith("win"):
         base = os.environ.get("LOCALAPPDATA")
@@ -434,7 +435,7 @@ async def run_command_async(
     stderr_task = asyncio.create_task(_enqueue(process.stderr, "stderr"))
 
     done_readers = 0
-    while done_readers < 2:
+    while done_readers < _STREAM_COUNT:
         item = await queue.get()
         if item is None:
             done_readers += 1
@@ -530,5 +531,6 @@ def run_command_sync(cmd: str | Sequence[str], cwd: str | None = None) -> tuple[
         text=True,
         capture_output=True,
         cwd=cwd,
+        check=False,
     )
     return result.stdout, result.stderr, result.returncode
