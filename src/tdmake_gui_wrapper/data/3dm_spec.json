@@ -1,0 +1,963 @@
+{
+  "generated_by": "scripts/sync_spec.py",
+  "source": "tdeck/3dmake (AST-derived; do not edit by hand)",
+  "action_order": [
+    "setup",
+    "new",
+    "load-gcode-or-slice",
+    "ensure-previewable-model",
+    "build",
+    "scale",
+    "orient",
+    "load-mesh",
+    "measure-mesh",
+    "info",
+    "image",
+    "preview",
+    "slice",
+    "print",
+    "list-profiles",
+    "list-overlays",
+    "edit-model",
+    "edit-overlay",
+    "edit-profile",
+    "clone-profile",
+    "edit-profile-gcode",
+    "edit-prompt",
+    "edit-global-config",
+    "list-libraries",
+    "install-libraries",
+    "test-connect",
+    "install-profile",
+    "self-update",
+    "help",
+    "version"
+  ],
+  "actions": [
+    {
+      "name": "setup",
+      "function": "setup",
+      "kind": "isolated",
+      "doc": "Set up 3DMake for the first time, or overwrite existing settings",
+      "isolated": true,
+      "internal": false,
+      "needs_options": false,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": true,
+      "launches_editor": false,
+      "source": "actions/setup_action.py",
+      "implied_actions": []
+    },
+    {
+      "name": "new",
+      "function": "new",
+      "kind": "isolated",
+      "doc": "Create a new 3DMake project directory structure",
+      "isolated": true,
+      "internal": false,
+      "needs_options": false,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": true,
+      "launches_editor": false,
+      "source": "actions/new_action.py",
+      "implied_actions": []
+    },
+    {
+      "name": "load-gcode-or-slice",
+      "function": "load_gcode_or_slice",
+      "kind": "internal",
+      "doc": null,
+      "isolated": false,
+      "internal": true,
+      "needs_options": true,
+      "uses_project_files": true,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/slice_action.py",
+      "implied_actions": []
+    },
+    {
+      "name": "ensure-previewable-model",
+      "function": "ensure_previewable_model",
+      "kind": "internal",
+      "doc": null,
+      "isolated": false,
+      "internal": true,
+      "needs_options": true,
+      "uses_project_files": true,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/preview_action.py",
+      "implied_actions": []
+    },
+    {
+      "name": "build",
+      "function": "build",
+      "kind": "pipeline",
+      "doc": "Build the OpenSCAD model and produce an STL file",
+      "isolated": false,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": true,
+      "input_file_types": [
+        ".scad"
+      ],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/build_action.py",
+      "implied_actions": []
+    },
+    {
+      "name": "scale",
+      "function": "scale",
+      "kind": "internal",
+      "doc": null,
+      "isolated": false,
+      "internal": true,
+      "needs_options": true,
+      "uses_project_files": true,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/scale_action.py",
+      "implied_actions": []
+    },
+    {
+      "name": "orient",
+      "function": "orient",
+      "kind": "pipeline",
+      "doc": "Auto-orient the model to minimize support",
+      "isolated": false,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": true,
+      "input_file_types": [
+        ".stl"
+      ],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/orient_action.py",
+      "implied_actions": []
+    },
+    {
+      "name": "load-mesh",
+      "function": "load_mesh",
+      "kind": "internal",
+      "doc": "Load the STL mesh into context",
+      "isolated": false,
+      "internal": true,
+      "needs_options": true,
+      "uses_project_files": true,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/mesh_actions.py",
+      "implied_actions": [
+        "scale"
+      ]
+    },
+    {
+      "name": "measure-mesh",
+      "function": "measure_mesh",
+      "kind": "internal",
+      "doc": "Calculate mesh metrics from loaded mesh",
+      "isolated": false,
+      "internal": true,
+      "needs_options": true,
+      "uses_project_files": true,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/mesh_actions.py",
+      "implied_actions": [
+        "load-mesh"
+      ]
+    },
+    {
+      "name": "info",
+      "function": "info",
+      "kind": "pipeline",
+      "doc": "Get basic info about the model, and AI description if enabled",
+      "isolated": false,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": true,
+      "input_file_types": [
+        ".stl"
+      ],
+      "last_in_chain": true,
+      "reads_stdin": true,
+      "launches_editor": false,
+      "source": "actions/info_action.py",
+      "implied_actions": [
+        "measure-mesh"
+      ]
+    },
+    {
+      "name": "image",
+      "function": "image",
+      "kind": "pipeline",
+      "doc": "Exports one or more rendered images of the model",
+      "isolated": false,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": true,
+      "input_file_types": [
+        ".stl"
+      ],
+      "last_in_chain": true,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/image_action.py",
+      "implied_actions": [
+        "load-mesh"
+      ]
+    },
+    {
+      "name": "preview",
+      "function": "preview",
+      "kind": "pipeline",
+      "doc": "Produce a 2-D representation of the object",
+      "isolated": false,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": true,
+      "input_file_types": [
+        ".stl"
+      ],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/preview_action.py",
+      "implied_actions": [
+        "ensure-previewable-model",
+        "measure-mesh"
+      ]
+    },
+    {
+      "name": "slice",
+      "function": "slice",
+      "kind": "pipeline",
+      "doc": "Slice the model and produce a printable gcode file",
+      "isolated": false,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": true,
+      "input_file_types": [
+        ".stl"
+      ],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/slice_action.py",
+      "implied_actions": [
+        "scale"
+      ]
+    },
+    {
+      "name": "print",
+      "function": "print_3d",
+      "kind": "pipeline",
+      "doc": "Send the sliced model to the printer",
+      "isolated": false,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": true,
+      "input_file_types": [
+        ".stl",
+        ".gcode"
+      ],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/print_action.py",
+      "implied_actions": [
+        "load-gcode-or-slice"
+      ]
+    },
+    {
+      "name": "list-profiles",
+      "function": "list_profiles",
+      "kind": "isolated",
+      "doc": "Lists available printer profiles",
+      "isolated": true,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/list_config_actions.py",
+      "implied_actions": []
+    },
+    {
+      "name": "list-overlays",
+      "function": "list_overlays",
+      "kind": "isolated",
+      "doc": "Lists available slicer setting overlays",
+      "isolated": true,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/list_config_actions.py",
+      "implied_actions": []
+    },
+    {
+      "name": "edit-model",
+      "function": "edit_model",
+      "kind": "isolated",
+      "doc": "Open model SCAD file in your editor (affected by -m)",
+      "isolated": true,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": true,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": true,
+      "source": "actions/edit_actions.py",
+      "implied_actions": []
+    },
+    {
+      "name": "edit-overlay",
+      "function": "edit_overlay",
+      "kind": "isolated",
+      "doc": "Open an overlay file in your editor (affected by -o)",
+      "isolated": true,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": true,
+      "launches_editor": true,
+      "source": "actions/edit_actions.py",
+      "implied_actions": []
+    },
+    {
+      "name": "edit-profile",
+      "function": "edit_profile",
+      "kind": "isolated",
+      "doc": "Open printer profile in your editor (affected by -p)",
+      "isolated": true,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": true,
+      "source": "actions/edit_actions.py",
+      "implied_actions": []
+    },
+    {
+      "name": "clone-profile",
+      "function": "clone_profile",
+      "kind": "isolated",
+      "doc": "Clone an existing printer profile under a new name",
+      "isolated": true,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": true,
+      "launches_editor": true,
+      "source": "actions/edit_actions.py",
+      "implied_actions": []
+    },
+    {
+      "name": "edit-profile-gcode",
+      "function": "edit_profile_gcode",
+      "kind": "isolated",
+      "doc": "Edit GCODE scripts in printer profile (affected by -p)",
+      "isolated": true,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": true,
+      "launches_editor": true,
+      "source": "actions/edit_profile_gcode_action.py",
+      "implied_actions": []
+    },
+    {
+      "name": "edit-prompt",
+      "function": "edit_prompt",
+      "kind": "isolated",
+      "doc": "Edit the AI prompt used by the info command",
+      "isolated": true,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": true,
+      "source": "actions/edit_actions.py",
+      "implied_actions": []
+    },
+    {
+      "name": "edit-global-config",
+      "function": "edit_global_config",
+      "kind": "isolated",
+      "doc": "Edit 3DMake user settings file (default printer, API keys, etc...)",
+      "isolated": true,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": true,
+      "source": "actions/edit_actions.py",
+      "implied_actions": []
+    },
+    {
+      "name": "list-libraries",
+      "function": "list_libraries",
+      "kind": "isolated",
+      "doc": "Lists available OpenSCAD libraries",
+      "isolated": true,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/library_actions.py",
+      "implied_actions": []
+    },
+    {
+      "name": "install-libraries",
+      "function": "install_libraries",
+      "kind": "isolated",
+      "doc": "Ensures that all libraries needed by the current project are installed",
+      "isolated": true,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/library_actions.py",
+      "implied_actions": []
+    },
+    {
+      "name": "test-connect",
+      "function": "test_connect",
+      "kind": "isolated",
+      "doc": "Test connection to the configured print server",
+      "isolated": true,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/test_connect_action.py",
+      "implied_actions": []
+    },
+    {
+      "name": "install-profile",
+      "function": "install_profile",
+      "kind": "isolated",
+      "doc": "Installs a new printer profile .INI file",
+      "isolated": true,
+      "internal": false,
+      "needs_options": true,
+      "uses_project_files": false,
+      "input_file_types": [
+        ".ini"
+      ],
+      "last_in_chain": false,
+      "reads_stdin": true,
+      "launches_editor": false,
+      "source": "actions/install_profile_action.py",
+      "implied_actions": []
+    },
+    {
+      "name": "self-update",
+      "function": "self_update",
+      "kind": "isolated",
+      "doc": "Download and install the latest version of 3DMake",
+      "isolated": true,
+      "internal": false,
+      "needs_options": false,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/self_update_action.py",
+      "implied_actions": []
+    },
+    {
+      "name": "help",
+      "function": "help",
+      "kind": "isolated",
+      "doc": "Display this message",
+      "isolated": true,
+      "internal": false,
+      "needs_options": false,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/help_action.py",
+      "implied_actions": []
+    },
+    {
+      "name": "version",
+      "function": "version",
+      "kind": "isolated",
+      "doc": "Print the 3DMake version and paths",
+      "isolated": true,
+      "internal": false,
+      "needs_options": false,
+      "uses_project_files": false,
+      "input_file_types": [],
+      "last_in_chain": false,
+      "reads_stdin": false,
+      "launches_editor": false,
+      "source": "actions/version_action.py",
+      "implied_actions": []
+    }
+  ],
+  "options": [
+    {
+      "flags": [
+        "-s",
+        "--scale"
+      ],
+      "dest": "scale",
+      "takes_value": true,
+      "repeatable": false,
+      "type": "str"
+    },
+    {
+      "flags": [
+        "--scale-x",
+        "--sx"
+      ],
+      "dest": "scale_x",
+      "takes_value": true,
+      "repeatable": false,
+      "type": "str"
+    },
+    {
+      "flags": [
+        "--scale-y",
+        "--sy"
+      ],
+      "dest": "scale_y",
+      "takes_value": true,
+      "repeatable": false,
+      "type": "str"
+    },
+    {
+      "flags": [
+        "--scale-z",
+        "--sz"
+      ],
+      "dest": "scale_z",
+      "takes_value": true,
+      "repeatable": false,
+      "type": "str"
+    },
+    {
+      "flags": [
+        "-m",
+        "--model"
+      ],
+      "dest": "model",
+      "takes_value": true,
+      "repeatable": false,
+      "type": "str"
+    },
+    {
+      "flags": [
+        "-v",
+        "--view"
+      ],
+      "dest": "view",
+      "takes_value": true,
+      "repeatable": false,
+      "type": "str"
+    },
+    {
+      "flags": [
+        "-p",
+        "--profile"
+      ],
+      "dest": "profile",
+      "takes_value": true,
+      "repeatable": false,
+      "type": "str"
+    },
+    {
+      "flags": [
+        "-o",
+        "--overlay"
+      ],
+      "dest": "overlay",
+      "takes_value": true,
+      "repeatable": true,
+      "type": "str"
+    },
+    {
+      "flags": [
+        "-a",
+        "--angle"
+      ],
+      "dest": "angle",
+      "takes_value": true,
+      "repeatable": true,
+      "type": "str"
+    },
+    {
+      "flags": [
+        "-i",
+        "--interactive"
+      ],
+      "dest": "interactive",
+      "takes_value": false,
+      "repeatable": false,
+      "type": "str"
+    },
+    {
+      "flags": [
+        "-c",
+        "--copies"
+      ],
+      "dest": "copies",
+      "takes_value": true,
+      "repeatable": false,
+      "type": "int"
+    },
+    {
+      "flags": [
+        "--colorscheme"
+      ],
+      "dest": "colorscheme",
+      "takes_value": true,
+      "repeatable": false,
+      "type": "str"
+    },
+    {
+      "flags": [
+        "--image-size"
+      ],
+      "dest": "image_size",
+      "takes_value": true,
+      "repeatable": false,
+      "type": "str"
+    },
+    {
+      "flags": [
+        "--help",
+        "-h"
+      ],
+      "dest": "help",
+      "takes_value": false,
+      "repeatable": false,
+      "type": "str"
+    },
+    {
+      "flags": [
+        "--version"
+      ],
+      "dest": "version",
+      "takes_value": false,
+      "repeatable": false,
+      "type": "str"
+    },
+    {
+      "flags": [
+        "--debug"
+      ],
+      "dest": "debug",
+      "takes_value": false,
+      "repeatable": false,
+      "type": "str"
+    }
+  ],
+  "config_keys": [
+    {
+      "key": "min_3dmake_version",
+      "type": "Optional[str]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "project_name",
+      "type": "Optional[str]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "model_name",
+      "type": "str",
+      "default": "main",
+      "required": false
+    },
+    {
+      "key": "view",
+      "type": "str",
+      "default": null,
+      "required": true
+    },
+    {
+      "key": "printer_profile",
+      "type": "str",
+      "default": null,
+      "required": true
+    },
+    {
+      "key": "copies",
+      "type": "int",
+      "default": 1,
+      "required": false
+    },
+    {
+      "key": "scale",
+      "type": "Optional[float]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "scale_x",
+      "type": "Optional[float]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "scale_y",
+      "type": "Optional[float]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "scale_z",
+      "type": "Optional[float]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "overlays",
+      "type": "List[str]",
+      "default": [],
+      "required": false
+    },
+    {
+      "key": "auto_start_prints",
+      "type": "bool",
+      "default": false,
+      "required": false
+    },
+    {
+      "key": "strict_warnings",
+      "type": "bool",
+      "default": false,
+      "required": false
+    },
+    {
+      "key": "editor",
+      "type": "Optional[str]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "edit_in_background",
+      "type": "bool",
+      "default": false,
+      "required": false
+    },
+    {
+      "key": "interactive",
+      "type": "bool",
+      "default": false,
+      "required": false
+    },
+    {
+      "key": "libraries",
+      "type": "List[str]",
+      "default": [],
+      "required": false
+    },
+    {
+      "key": "local_libraries",
+      "type": "List[str]",
+      "default": [],
+      "required": false
+    },
+    {
+      "key": "print_mode",
+      "type": "str",
+      "default": "octoprint",
+      "required": false
+    },
+    {
+      "key": "octoprint_host",
+      "type": "Optional[str]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "octoprint_key",
+      "type": "Optional[str]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "bambu_host",
+      "type": "Optional[str]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "bambu_serial_number",
+      "type": "Optional[str]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "bambu_access_code",
+      "type": "Optional[str]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "gemini_key",
+      "type": "Optional[str]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "openrouter_key",
+      "type": "Optional[str]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "openai_compat_host",
+      "type": "Optional[str]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "openai_api_key",
+      "type": "Optional[str]",
+      "default": null,
+      "required": false
+    },
+    {
+      "key": "llm_name",
+      "type": "str",
+      "default": "gemini-2.5-flash",
+      "required": false
+    },
+    {
+      "key": "image_angles",
+      "type": "List[str]",
+      "default": [
+        "above_front_left",
+        "above_front",
+        "above_front_right"
+      ],
+      "required": false
+    },
+    {
+      "key": "colorscheme",
+      "type": "str",
+      "default": "slicer_dark",
+      "required": false
+    },
+    {
+      "key": "image_size",
+      "type": "str",
+      "default": "1080x720",
+      "required": false
+    },
+    {
+      "key": "svg_stroke_width",
+      "type": "float",
+      "default": 1,
+      "required": false
+    },
+    {
+      "key": "svg_fill_color",
+      "type": "str",
+      "default": "oldLace",
+      "required": false
+    },
+    {
+      "key": "debug",
+      "type": "bool",
+      "default": false,
+      "required": false
+    },
+    {
+      "key": "log_last_prompt",
+      "type": "bool",
+      "default": false,
+      "required": false
+    }
+  ],
+  "enums": {
+    "image_angles": [
+      "left",
+      "right",
+      "back",
+      "front",
+      "bottom",
+      "top",
+      "above_front",
+      "above_front_left",
+      "above_front_right",
+      "above_back_left",
+      "above_back_right"
+    ],
+    "colorschemes": [
+      "slicer_light",
+      "slicer_dark",
+      "light_on_dark"
+    ],
+    "silhouette_views": [
+      "3sil",
+      "topsil",
+      "leftsil",
+      "rightsil",
+      "frontsil",
+      "backsil"
+    ],
+    "print_modes": [
+      "octoprint",
+      "bambu_lan",
+      "bambu_connect"
+    ]
+  }
+}

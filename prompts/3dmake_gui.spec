@@ -24,7 +24,10 @@ try:
 except Exception:
     webview_datas = []
 
-all_datas = nicegui_datas + webview_datas
+# The generated 3dm CLI spec (scripts/sync_spec.py) drives every command the GUI builds.
+spec_datas = [(str(Path("src/tdmake_gui_wrapper/data/3dm_spec.json")), "tdmake_gui_wrapper/data")]
+
+all_datas = nicegui_datas + webview_datas + spec_datas
 
 # ── Hidden imports ─────────────────────────────────────────────────────────
 # NiceGUI and uvicorn rely on dynamic imports that PyInstaller can't detect.

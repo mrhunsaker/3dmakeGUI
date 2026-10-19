@@ -1,0 +1,174 @@
+{
+  "meta": {
+    "title": "Complete inventory of tdeck/3dmake (3dm) CLI functions",
+    "source_repo": "https://github.com/tdeck/3dmake (the URL in the request said 'fithub.com'; treated as a typo for github.com)",
+    "sources_read": [
+      "README.md (main)",
+      "3dm.py (main, 353 lines: full argparse definition, verb resolution, pipeline loop)",
+      "CLAUDE.md (architecture, action file list, preview planes)",
+      "Release notes v0.2, v0.3, v0.4, v0.6, v0.65, v0.8"
+    ],
+    "confidence_legend": {
+      "verified": "Stated in README/3dm.py/CLAUDE.md/release notes",
+      "inferred": "Deduced from those sources, not seen in the action's own source file",
+      "verify": "Must be confirmed by running `3dm help` and reading actions/*.py before relying on it"
+    },
+    "known_gaps": [
+      "actions/__init__.py (ALL_ACTIONS_IN_ORDER) and each actions/*.py were not readable (GitHub robots block on tree/raw). The exact verb list and implied_actions/isolated/last_in_chain flags are reconstructed from README + 3dm.py + CLAUDE.md. Step 0 of the remediation plan regenerates this file from `3dm help` and the source to close the gap.",
+      "Version of 3dmake covered: current main (README mentions scale options, preview planes, min_3dmake_version, which post-date v0.8)."
+    ],
+    "binary_names": ["3dm", "3dm.py (source: python 3dm.py, Python 3.13, uv)"]
+  },
+
+  "invocation_grammar": {
+    "form": "3dm [global options] <action> [<action> ...] [input_file]",
+    "rules": [
+      "Multiple actions can be chained; they execute in the fixed internal order ALL_ACTIONS_IN_ORDER, NOT the order typed (verified: 3dm.py iterates ALL_ACTIONS_IN_ORDER and runs those present in the verb set).",
+      "Verbs are case-insensitive (lowercased) (verified).",
+      "Dashed options may be interleaved with actions (parse_known_args) (verified). Unknown dashed options are a hard error 'Unknown option(s): ...' (verified).",
+      "Any trailing token containing a '.' is treated as an input file; more than one input file is an error 'Multiple inputs not supported yet' (verified).",
+      "Any non-dashed token without a '.' is treated as an action verb; an unknown one errors \"Unknown action 'x'\" (verified). Consequence: `3dm new myproject` is invalid.",
+      "If the first input file is .scad, 'build' is added to the verb set automatically (verified).",
+      "Implied actions are added recursively, e.g. print implies slice (verified in README: 'print implies that 3DMake must slice').",
+      "Actions flagged isolated cannot be combined with other actions: error \"The action 'x' can only be used on its own\" (verified mechanism; which verbs are isolated: setup, help, version at minimum per CLAUDE.md; self-update is checked by name in the update notice).",
+      "Actions flagged last_in_chain cannot be followed by later actions in internal order (verified mechanism; likely print) .",
+      "Single-file mode (input file given): build dir is a temp dir; model name derives from file stem; outputs are copied to the current directory and 'Result is in <file>' printed (verified). --model cannot be combined with an input file.",
+      "Accepted input types are per action (input_file_types): .stl, .scad, .gcode (verified mechanism; exact per-action mapping: verify). Action with no input types errors 'This action does not take an input file'.",
+      "Project discovery: ./3dmake.toml, else ../3dmake.toml ('Using 3DMake project in parent directory...') (verified). Project settings override global defaults.toml, CLI flags override both (verified).",
+      "If the config dir does not exist and the verb is not 'setup', 3dm interactively offers to run setup (verified).",
+      "Errors print 'ERORR: <message>' (sic) without stack trace unless --debug (verified). Exit codes: 1 on error, 2 on Ctrl+C (verified).",
+      "After running, a background update check may print '3DMake X is available (you have Y). Run '3dm self-update' to install it.' (verified)."
+    ],
+    "pipeline_order_known": ["build", "measure (internal)", "orient", "preview", "slice", "print"],
+    "pipeline_order_note": "Position of info, image, edit-*, list-*, test-connect, install-libraries relative to the pipeline is verify. CLAUDE.md lists pipeline: Build -> Measure -> Orient -> Preview -> Slice -> Print."
+  },
+
+  "global_options": [
+    {"id": "scale", "flags": ["-s", "--scale"], "takes_value": true, "value": "factor (1.5) or percentage (150%)", "repeatable": false, "overrides_config": "scale", "constraints": "Cannot be combined with --scale-x/-y/-z or per-axis config keys", "applies_to": ["build", "orient", "slice", "preview", "info", "image"], "confidence": "verified"},
+    {"id": "scale_x", "flags": ["--scale-x", "--sx"], "takes_value": true, "value": "factor or percentage", "overrides_config": "scale_x", "confidence": "verified"},
+    {"id": "scale_y", "flags": ["--scale-y", "--sy"], "takes_value": true, "value": "factor or percentage", "overrides_config": "scale_y", "confidence": "verified"},
+    {"id": "scale_z", "flags": ["--scale-z", "--sz"], "takes_value": true, "value": "factor or percentage", "overrides_config": "scale_z", "confidence": "verified"},
+    {"id": "model", "flags": ["-m", "--model"], "takes_value": true, "value": "model name; trailing .scad is stripped", "overrides_config": "model_name", "constraints": "Invalid with an input file", "confidence": "verified"},
+    {"id": "view", "flags": ["-v", "--view"], "takes_value": true, "value": "3sil | frontsil | backsil | leftsil | rightsil | topsil | <preview plane name e.g. level#1>", "overrides_config": "view", "applies_to": ["preview"], "confidence": "verified"},
+    {"id": "profile", "flags": ["-p", "--profile"], "takes_value": true, "value": "printer profile name (see list-profiles)", "overrides_config": "printer_profile", "applies_to": ["slice", "print", "edit-profile", "edit-overlay", "preview"], "confidence": "verified"},
+    {"id": "overlay", "flags": ["-o", "--overlay"], "takes_value": true, "repeatable": true, "value": "overlay name (see list-overlays)", "overrides_config": "overlays", "applies_to": ["slice", "print", "edit-overlay"], "confidence": "verified"},
+    {"id": "angle", "flags": ["-a", "--angle"], "takes_value": true, "repeatable": true, "value": "front|back|left|right|top|bottom|above_front|above_front_left|above_front_right|above_back_left|above_back_right", "overrides_config": "image_angles", "applies_to": ["image", "info"], "confidence": "verified"},
+    {"id": "interactive", "flags": ["-i", "--interactive"], "takes_value": false, "overrides_config": "interactive", "applies_to": ["info"], "note": "Opens a follow-up Q&A loop on stdin; requires a TTY/stdin passthrough", "confidence": "verified"},
+    {"id": "copies", "flags": ["-c", "--copies"], "takes_value": true, "type": "int", "default": 1, "overrides_config": "copies", "applies_to": ["slice", "print"], "confidence": "verified"},
+    {"id": "colorscheme", "flags": ["--colorscheme"], "takes_value": true, "value": "slicer_light | slicer_dark | light_on_dark", "overrides_config": "colorscheme", "applies_to": ["image", "info"], "confidence": "verified"},
+    {"id": "image_size", "flags": ["--image-size"], "takes_value": true, "value": "WIDTHxHEIGHT e.g. 640x480", "overrides_config": "image_size", "applies_to": ["image", "info"], "confidence": "verified"},
+    {"id": "debug", "flags": ["--debug"], "takes_value": false, "overrides_config": "debug", "effect": "Verbose output and full stack traces", "confidence": "verified"},
+    {"id": "help_flag", "flags": ["-h", "--help"], "takes_value": false, "effect": "Prints help and exits (same as 3dm help)", "confidence": "verified"},
+    {"id": "version_flag", "flags": ["--version"], "takes_value": false, "effect": "Prints version and exits (same as 3dm version)", "confidence": "verified"}
+  ],
+
+  "actions": [
+    {"name": "setup", "category": "setup", "summary": "Interactive first-time/upgrade configuration: creates config dir, copies default profiles/overlays, asks for default printer profile, OctoPrint host/key, Gemini key, Ollama model. On upgrade preserves settings and optionally modified profiles/overlays.", "isolated": true, "needs_project": false, "input_files": [], "options_used": [], "interactive_stdin": true, "writes": ["<config_dir>/defaults.toml", "<config_dir>/profiles/*", "<config_dir>/overlays/*"], "confidence": "verified"},
+    {"name": "new", "category": "project", "summary": "Create a new 3DMake project in the CURRENT directory (src/, build/, 3dmake.toml with strict_warnings=true; default main.scad template with $fs/$fa and a sphere). Takes no name argument.", "isolated": "verify", "needs_project": false, "input_files": [], "options_used": [], "interactive_stdin": "verify", "writes": ["3dmake.toml", "src/main.scad", "build/"], "confidence": "verified"},
+    {"name": "edit-model", "category": "edit", "summary": "Open src/<model>.scad in the configured editor.", "options_used": ["model"], "needs_project": true, "uses_config": ["editor", "edit_in_background"], "launches_external_process": true, "confidence": "verified"},
+    {"name": "edit-overlay", "category": "edit", "summary": "Open an overlay .ini in the editor; creates it if missing (asks whether it is printer-specific, stored under overlays/<profile>/).", "options_used": ["overlay", "profile"], "interactive_stdin": true, "launches_external_process": true, "confidence": "verified"},
+    {"name": "edit-profile", "category": "edit", "summary": "Open an existing printer profile .ini in the editor (cannot create new printer profiles).", "options_used": ["profile"], "launches_external_process": true, "confidence": "verified"},
+    {"name": "edit-global-config", "category": "edit", "summary": "Open defaults.toml in the editor.", "options_used": [], "launches_external_process": true, "confidence": "verified"},
+    {"name": "edit-prompt", "category": "edit", "summary": "Open the LLM prompt file used by info; first run seeds the default prompt. Supports $object_count placeholder.", "options_used": [], "launches_external_process": true, "confidence": "verified"},
+    {"name": "build", "category": "pipeline", "summary": "OpenSCAD .scad -> STL in build/ (live elapsed-time output). Applies libraries/local_libraries, strict_warnings, scale options. Collects preview plane names.", "options_used": ["model", "scale", "scale_x", "scale_y", "scale_z", "debug"], "input_files": [".scad"], "needs_project": "unless input file", "outputs": ["build/<model>.stl"], "confidence": "verified"},
+    {"name": "orient", "category": "pipeline", "summary": "Auto-orient (Tweaker3) for printing; produces <model>-oriented.stl. Implies build for .scad sources.", "options_used": ["model", "scale"], "input_files": [".stl", ".scad"], "implied_actions": ["build"], "outputs": ["build/<model>-oriented.stl"], "confidence": "verified (implied_actions: inferred)"},
+    {"name": "preview", "category": "pipeline", "summary": "Flat tactile silhouette preview as SVG plus thin extruded STL; or a cross-section at a named preview plane. Output SVG styling via svg_stroke_width / svg_fill_color.", "options_used": ["view", "model"], "input_files": [".stl", ".scad"], "outputs": ["build/<stem>-<view>.svg", "build/<stem>-<view>.stl"], "notes": ["Silhouette views: 3sil, frontsil, backsil, leftsil, rightsil, topsil", "Plane views: name defined in SCAD via xy_preview_plane/xz_preview_plane from 3dmake/preview.scad; selected with -v level#1; forces fresh build; uses un-oriented model"], "confidence": "verified"},
+    {"name": "slice", "category": "pipeline", "summary": "PrusaSlicer to GCODE using profile + overlays; prints filament length, weight and per-extrusion-type breakdown; errors if object exceeds build plate in X/Y/Z; honors copies and scale.", "options_used": ["profile", "overlay", "copies", "scale", "model"], "input_files": [".stl", ".scad"], "outputs": ["build/<project>-<model>.gcode"], "confidence": "verified"},
+    {"name": "print", "category": "pipeline", "summary": "Send GCODE to printer. Implies slice. print_mode: octoprint | bambu_connect | bambu_lan. auto_start_prints controls whether the print starts immediately.", "implied_actions": ["slice"], "last_in_chain": "likely", "input_files": [".stl", ".scad", ".gcode"], "uses_config": ["print_mode", "octoprint_host", "octoprint_key", "bambu_host", "bambu_access_code", "bambu_serial_number", "auto_start_prints"], "confidence": "verified"},
+    {"name": "test-connect", "category": "printer", "summary": "Test connection to OctoPrint or Bambu printer without printing.", "uses_config": ["print_mode", "octoprint_host", "octoprint_key", "bambu_host", "bambu_access_code", "bambu_serial_number"], "input_files": [], "confidence": "verified (v0.8 release note)"},
+    {"name": "info", "category": "inspect", "summary": "Describe a model: bounding-box dimensions always; with Gemini/OpenRouter/Ollama/OpenAI-compatible configured, renders multiple angles and returns an AI description. -i enables interactive follow-up questions.", "options_used": ["model", "angle", "interactive", "image_size", "colorscheme", "scale"], "input_files": [".stl", ".scad"], "interactive_stdin": "with -i", "uses_config": ["gemini_key", "llm_name", "openrouter_key", "openai_compat_host", "openai_api_key", "interactive", "image_angles"], "confidence": "verified"},
+    {"name": "image", "category": "inspect", "summary": "Render PNG images of the model from named angles on an x-y grid, auto-centered/zoomed.", "options_used": ["angle", "image_size", "colorscheme", "model"], "input_files": [".stl", ".scad"], "outputs": ["build/<model>-<angle>.png"], "confidence": "verified"},
+    {"name": "list-profiles", "category": "config", "summary": "List available printer profiles.", "input_files": [], "confidence": "verified"},
+    {"name": "list-overlays", "category": "config", "summary": "List available overlays.", "input_files": [], "confidence": "verified"},
+    {"name": "list-libraries", "category": "libraries", "summary": "List library-manager libraries with documentation URLs.", "input_files": [], "confidence": "verified"},
+    {"name": "install-libraries", "category": "libraries", "summary": "Download libraries named in the project's libraries list that are not present. Local libraries need no install.", "needs_project": true, "confidence": "verified"},
+    {"name": "self-update", "category": "maintenance", "summary": "Upgrade 3DMake to the latest release.", "isolated": "likely", "confidence": "verified"},
+    {"name": "version", "category": "maintenance", "summary": "Print version and the 3DMake config folder location.", "isolated": true, "confidence": "verified"},
+    {"name": "help", "category": "maintenance", "summary": "List all actions (docstrings come from handler functions).", "isolated": true, "confidence": "verified"}
+  ],
+
+  "internal_actions_not_user_invocable": [
+    {"name": "measure", "note": "measure_action.py: extracts mesh metrics (bounding box); appears to be an internal pipeline step", "confidence": "inferred"}
+  ],
+
+  "config_keys": [
+    {"key": "project_name", "type": "string", "default": "project folder name", "cli_flag": null},
+    {"key": "model_name", "type": "string", "default": "main", "cli_flag": "-m"},
+    {"key": "view", "type": "string", "default": "3sil", "cli_flag": "-v"},
+    {"key": "printer_profile", "type": "string", "default": "set in setup", "cli_flag": "-p"},
+    {"key": "scale", "type": "float|percent-string", "cli_flag": "-s"},
+    {"key": "scale_x", "type": "float|percent-string", "cli_flag": "--scale-x"},
+    {"key": "scale_y", "type": "float|percent-string", "cli_flag": "--scale-y"},
+    {"key": "scale_z", "type": "float|percent-string", "cli_flag": "--scale-z"},
+    {"key": "overlays", "type": "list[string]", "default": [], "cli_flag": "-o"},
+    {"key": "print_mode", "type": "enum", "values": ["octoprint", "bambu_connect", "bambu_lan"], "default": "octoprint"},
+    {"key": "octoprint_host", "type": "url"},
+    {"key": "octoprint_key", "type": "secret"},
+    {"key": "bambu_host", "type": "string"},
+    {"key": "bambu_access_code", "type": "secret"},
+    {"key": "bambu_serial_number", "type": "string"},
+    {"key": "auto_start_prints", "type": "bool", "default": true},
+    {"key": "strict_warnings", "type": "bool", "default": false, "note": "true in newly created projects"},
+    {"key": "editor", "type": "string"},
+    {"key": "edit_in_background", "type": "bool"},
+    {"key": "gemini_key", "type": "secret"},
+    {"key": "llm_name", "type": "string"},
+    {"key": "openrouter_key", "type": "secret"},
+    {"key": "openai_compat_host", "type": "url"},
+    {"key": "openai_api_key", "type": "secret"},
+    {"key": "interactive", "type": "bool", "default": false, "cli_flag": "-i"},
+    {"key": "libraries", "type": "list[string]", "default": []},
+    {"key": "local_libraries", "type": "list[path]", "default": []},
+    {"key": "image_angles", "type": "list[string]", "default": ["above_front_left", "above_front", "above_front_right"], "cli_flag": "-a"},
+    {"key": "image_size", "type": "WxH", "default": "1080x720", "cli_flag": "--image-size"},
+    {"key": "copies", "type": "int", "default": 1, "cli_flag": "-c"},
+    {"key": "colorscheme", "type": "enum", "values": ["slicer_light", "slicer_dark", "light_on_dark"], "default": "slicer_dark", "cli_flag": "--colorscheme"},
+    {"key": "svg_stroke_width", "type": "float(mm)", "default": 1},
+    {"key": "svg_fill_color", "type": "css-color-name", "default": "oldLace"},
+    {"key": "debug", "type": "bool", "default": false, "cli_flag": "--debug"},
+    {"key": "min_3dmake_version", "type": "version-string", "note": "Project-level; 3dm refuses to run if older (from 3dm.py)", "confidence": "verified in 3dm.py, undocumented in README table"}
+  ],
+
+  "config_files_and_locations": [
+    {"path": "<config_dir>/defaults.toml", "purpose": "Global settings", "edit_action": "edit-global-config"},
+    {"path": "./3dmake.toml (or ../3dmake.toml)", "purpose": "Project settings; overrides defaults.toml", "edit_action": null, "note": "No dedicated edit action; GUI must open the file directly"},
+    {"path": "<config_dir>/profiles/*.ini", "purpose": "PrusaSlicer printer profiles", "edit_action": "edit-profile"},
+    {"path": "<config_dir>/overlays/**/*.ini", "purpose": "Setting overlays; printer-specific under overlays/<profile>/", "edit_action": "edit-overlay"},
+    {"path": "<config_dir>/<prompt file>", "purpose": "LLM prompt for info", "edit_action": "edit-prompt"},
+    {"path": "<project>/src/<model>.scad", "purpose": "OpenSCAD model source", "edit_action": "edit-model"},
+    {"path": "<project>/build/", "purpose": "Outputs: .stl, -oriented.stl, .gcode, .svg, .png"}
+  ],
+
+  "environment": [
+    {"name": "THREEDMAKE_CONFIG_DIR", "purpose": "Overrides the config directory (default platformdirs user_config_path('3dmake'))", "confidence": "verified"},
+    {"name": "VISUAL / EDITOR", "purpose": "Fallback editors on macOS/Linux when 'editor' unset (else nano)", "confidence": "verified (README footnote)"}
+  ],
+
+  "scad_library": {
+    "builtin_library_path": "scad_library/3dmake",
+    "modules": [
+      {"name": "xy_preview_plane(name, index)", "file": "3dmake/preview.scad", "purpose": "Marks an XY cross-section plane for preview -v name#index"},
+      {"name": "xz_preview_plane(name)", "file": "3dmake/preview.scad", "purpose": "Marks an XZ cross-section plane"}
+    ],
+    "library_manager": "libraries = [...] in 3dmake.toml then `3dm install-libraries`; imports use lowercase folder name (use <bosl/shapes.scad>)",
+    "note": "Authoring-time SCAD feature; GUI can expose a plane picker populated from build metadata (preview_plane_names)"
+  },
+
+  "feature_checklist_for_gui_parity": {
+    "actions_total_user_invocable": 22,
+    "global_flags_total": 16,
+    "config_keys_total": 35,
+    "must_expose_non_obvious": [
+      "Action chaining with fixed internal order and implied actions",
+      "Single input file mode (stl/scad/gcode) with outputs copied to cwd",
+      "Repeatable -o and -a",
+      "Per-axis scale and percent syntax",
+      "Interactive stdin for setup, edit-overlay, info -i, self-update confirmation",
+      "Preview plane views (-v name#N)",
+      "test-connect",
+      "edit-prompt",
+      "--debug",
+      "Project config editing (3dmake.toml) and min_3dmake_version"
+    ]
+  }
+}

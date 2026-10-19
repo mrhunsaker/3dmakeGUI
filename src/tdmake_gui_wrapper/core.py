@@ -32,6 +32,10 @@ import shlex
 import shutil
 import subprocess
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def get_packaged_executable_dir() -> Path | None:
@@ -358,16 +362,30 @@ def get_3dmake_defaults_toml_path() -> Path:
     return get_3dmake_config_dir() / "defaults.toml"
 
 
+def _command_text(cmd: str | Sequence[str]) -> str:
+    """Return a safely quoted command string for display or terminal launch."""
+    if isinstance(cmd, str):
+        return cmd
+    if sys.platform.startswith("win"):
+        return subprocess.list2cmdline(list(cmd))
+    return shlex.join(list(cmd))
+
+
 async def run_command_async(
-    cmd: str,
+    cmd: str | Sequence[str],
     cwd: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> AsyncIterator[str]:
-    """Run a shell command and asynchronously stream process output lines.
+    """Run a command and asynchronously stream process output lines.
 
     Parameters
     ----------
-    cmd : str
-        Shell command to execute.
+    cmd : str or sequence of str
+        An argument list is executed directly with no shell (preferred, immune
+        to quoting/injection problems). A plain string is run through the shell
+        for backwards compatibility.
+    env : dict or None, optional
+        Extra environment variables merged over the current environment.
     cwd : str or None, optional
         Working directory used for subprocess execution.
 
@@ -382,12 +400,25 @@ async def run_command_async(
     Output is multiplexed through an ``asyncio.Queue`` so stdout and stderr can
     be consumed without blocking each other.
     """
-    process = await asyncio.create_subprocess_shell(
-        cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
-    )
+    child_env = {**os.environ, **env} if env else None
+    if isinstance(cmd, str):
+        process = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
+            cwd=cwd,
+            env=child_env,
+        )
+    else:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
+            cwd=cwd,
+            env=child_env,
+        )
 
     queue: asyncio.Queue[str | None] = asyncio.Queue()
 
@@ -416,13 +447,16 @@ async def run_command_async(
     yield f"[done] {process.returncode}"
 
 
-def launch_in_terminal(cmd: str) -> bool:
+def launch_in_terminal(cmd: str | Sequence[str], cwd: str | None = None) -> bool:
     """Launch a command in a new terminal window.
 
     Parameters
     ----------
-    cmd : str
-        Command string to execute.
+    cmd : str or sequence of str
+        Command to execute. An argument list is quoted safely for the target
+        shell.
+    cwd : str or None, optional
+        Directory the terminal should start in.
 
     Returns
     -------
@@ -430,11 +464,15 @@ def launch_in_terminal(cmd: str) -> bool:
         ``True`` when a compatible terminal launcher is found and started;
         ``False`` when no launcher is available or the command is empty.
     """
+    cmd = _command_text(cmd)
     if not cmd.strip():
         return False
 
+    if cwd and not sys.platform.startswith("win"):
+        cmd = f"cd {shlex.quote(cwd)} && {cmd}"
+
     if sys.platform.startswith("win"):
-        subprocess.Popen(["cmd.exe", "/c", "start", "cmd.exe", "/k", cmd])
+        subprocess.Popen(["cmd.exe", "/c", "start", "cmd.exe", "/k", cmd], cwd=cwd)
         return True
 
     if sys.platform == "darwin":
@@ -471,7 +509,7 @@ def launch_in_terminal(cmd: str) -> bool:
     return False
 
 
-def run_command_sync(cmd: str, cwd: str | None = None) -> tuple[str, str, int]:
+def run_command_sync(cmd: str | Sequence[str], cwd: str | None = None) -> tuple[str, str, int]:
     """Run a shell command synchronously and collect captured output.
 
     Parameters
@@ -488,7 +526,7 @@ def run_command_sync(cmd: str, cwd: str | None = None) -> tuple[str, str, int]:
     """
     result = subprocess.run(
         cmd,
-        shell=True,
+        shell=isinstance(cmd, str),
         text=True,
         capture_output=True,
         cwd=cwd,

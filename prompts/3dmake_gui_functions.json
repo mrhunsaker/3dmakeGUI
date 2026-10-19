@@ -1,0 +1,79 @@
+{
+  "meta": {
+    "title": "Functions currently addressed by mrhunsaker/3dmakeGUI",
+    "repo": "https://github.com/mrhunsaker/3dmakeGUI",
+    "evidence": "The repo tree could not be fetched (GitHub blocks automated access). This inventory is taken from the published README of the repo's vscode-extension (VS Code Marketplace TVIResources.vscode-3dmake-gui, version listing 2026.5.2 / VSIX 2026.4.29), which states it is built from 3dmakeGUI/vscode-extension and 'wraps every 3dm subcommand'.",
+    "limitations": [
+      "If 3dmakeGUI contains other front-ends (e.g. a desktop or web GUI) beside vscode-extension/, they are NOT covered here. Step 0 of the remediation plan scans the whole repo and appends them.",
+      "'cli_executed' is what the extension README says it runs. The 'cli_correct' verdicts are derived by checking each string against the argparse and verb-resolution logic in tdeck/3dmake 3dm.py, not by running it."
+    ],
+    "implementation_facts": {
+      "language": "TypeScript (VS Code extension)",
+      "process_model": "Node child_process spawn; stdout/stderr streamed to an Output Channel (README)",
+      "binary_resolution": "setting 3dmake.binaryPath, else PATH, else env THREE_DM_PATH / THREEDM_PATH",
+      "settings": ["3dmake.binaryPath", "3dmake.defaultModel", "3dmake.defaultView", "3dmake.defaultProfile", "3dmake.showOutputOnRun", "3dmake.announceCommandCompletion"]
+    }
+  },
+
+  "gui_commands": [
+    {"id": "selectProject", "label": "Select Project File or Directory", "cli_executed": null, "kind": "gui_only", "cli_correct": "n/a"},
+    {"id": "build", "label": "Build STL", "cli_executed": "3dm build", "real_cli": "3dm build", "cli_correct": true, "extra": "opens .stl in built-in viewer"},
+    {"id": "slice", "label": "Slice", "cli_executed": "3dm slice", "real_cli": "3dm slice (project-mode STL must exist or 3dm must imply build: verify)", "cli_correct": true, "extra": "opens .gcode in editor"},
+    {"id": "orient", "label": "Orient", "cli_executed": "3dm orient", "real_cli": "3dm orient", "cli_correct": true},
+    {"id": "preview", "label": "Preview (SVG)", "cli_executed": "3dm preview", "real_cli": "3dm preview [-v VIEW]", "cli_correct": true},
+    {"id": "buildSlice", "label": "Build + Slice", "cli_executed": "3dm build --slice", "real_cli": "3dm build slice", "cli_correct": false, "why": "'--slice' is a dashed token not defined in argparse -> 'Unknown option(s): --slice'. Actions are positional verbs."},
+    {"id": "fullPipeline", "label": "Full Pipeline (Build + Orient + Slice)", "cli_executed": "3dm build --orient --slice", "real_cli": "3dm build orient slice", "cli_correct": false, "why": "'--orient' and '--slice' are unknown options."},
+    {"id": "info", "label": "Describe (Info)", "cli_executed": "3dm info", "real_cli": "3dm info [-i] [-a ANGLE ...] [--image-size WxH] [--colorscheme C]", "cli_correct": true, "gap": "No -i, -a, --image-size, --colorscheme; README mislabels it 'model metadata'"},
+    {"id": "print", "label": "Print", "cli_executed": "3dm print", "real_cli": "3dm print [-p P] [-o O ...] [-c N]", "cli_correct": true},
+    {"id": "editSource", "label": "Open/Edit Source", "cli_executed": null, "kind": "gui_only_opens_file", "real_cli": "3dm edit-model [-m MODEL]", "cli_correct": "bypasses CLI", "why": "Opens src/*.scad in VS Code instead of running edit-model; acceptable inside an IDE but violates 'direct execution' requirement; also ignores -m and the default-template creation."},
+    {"id": "exportImages", "label": "Export Images", "cli_executed": "3dm images", "real_cli": "3dm image", "cli_correct": false, "why": "'images' is not an action -> \"Unknown action 'images'\"."},
+    {"id": "newProject", "label": "New Project", "cli_executed": "3dm new <name>", "real_cli": "3dm new (run with cwd = target directory)", "cli_correct": false, "why": "'<name>' without a '.' is parsed as an action verb -> \"Unknown action '<name>'\"; 'new' takes no name."},
+    {"id": "setup", "label": "Run Setup", "cli_executed": "3dm setup", "real_cli": "3dm setup", "cli_correct": "partial", "why": "Setup is interactive (stdin prompts). The extension spawns with piped output and no stdin passthrough, so prompts cannot be answered unless a terminal is used (verify)."},
+    {"id": "listLibraries", "label": "List Libraries", "cli_executed": "3dm libraries --list", "real_cli": "3dm list-libraries", "cli_correct": false, "why": "'libraries' unknown action and '--list' unknown option."},
+    {"id": "installLibraries", "label": "Install Libraries", "cli_executed": "3dm libraries --install", "real_cli": "3dm install-libraries", "cli_correct": false, "why": "Same as above."},
+    {"id": "listProfiles", "label": "List Profiles", "cli_executed": "3dm profiles", "real_cli": "3dm list-profiles", "cli_correct": false, "why": "'profiles' is not an action."},
+    {"id": "listOverlays", "label": "List Overlays", "cli_executed": "3dm overlays", "real_cli": "3dm list-overlays", "cli_correct": false, "why": "'overlays' is not an action."},
+    {"id": "version", "label": "Show Version", "cli_executed": "3dm version", "real_cli": "3dm version", "cli_correct": true},
+    {"id": "selfUpdate", "label": "Self-Update", "cli_executed": "3dm self-update", "real_cli": "3dm self-update", "cli_correct": "partial", "why": "May prompt for confirmation on stdin (verify); no stdin passthrough."},
+    {"id": "help", "label": "Show Help", "cli_executed": "3dm help", "real_cli": "3dm help", "cli_correct": true},
+    {"id": "customCommand", "label": "Run Custom Command", "cli_executed": "3dm <user args>", "real_cli": "3dm <user args>", "cli_correct": true, "note": "Escape hatch; keep it but it must not be the only route to missing features"},
+    {"id": "viewStl", "label": "View STL in 3D Viewer", "cli_executed": null, "kind": "gui_only", "note": "Binary STL only"},
+    {"id": "viewSvg", "label": "View Last SVG Preview", "cli_executed": null, "kind": "gui_only"},
+    {"id": "setBinaryPath", "label": "Set 3dm Binary Path", "cli_executed": null, "kind": "gui_only"},
+    {"id": "openGlobalConfig", "label": "Open Global Config (defaults.toml)", "cli_executed": null, "kind": "gui_only_opens_file", "real_cli": "3dm edit-global-config", "cli_correct": "bypasses CLI"},
+    {"id": "openProjectConfig", "label": "Open Project Config (3dmake.toml)", "cli_executed": null, "kind": "gui_only_opens_file", "real_cli": "(no CLI equivalent)", "cli_correct": "n/a"},
+    {"id": "refreshProject", "label": "Refresh Project View", "cli_executed": null, "kind": "gui_only"}
+  ],
+
+  "gui_options_exposed": [
+    {"label": "Model (-m)", "flag": "-m", "free_text": true},
+    {"label": "View (-v)", "flag": "-v", "note": "setting enumerates 6 silhouette values only; plane views not offered"},
+    {"label": "Profile (-p)", "flag": "-p", "free_text": true, "note": "no picker from list-profiles"},
+    {"label": "Overlay (-o)", "flag": "-o", "note": "single value; CLI supports repeating -o"}
+  ],
+
+  "gui_shortcuts": ["Ctrl+Alt+B build", "Ctrl+Alt+E edit source", "Ctrl+Alt+P preview", "Ctrl+Alt+O select project", "Ctrl+Alt+V view STL", "Ctrl+Alt+X custom command"],
+
+  "coverage_summary": {
+    "cli_actions_total": 22,
+    "cli_actions_correctly_reachable_from_gui": ["build", "slice", "orient", "preview", "info", "print", "setup (partial)", "version", "self-update (partial)", "help"],
+    "cli_actions_reachable_but_with_WRONG_command": ["image (as 'images')", "new (as 'new <name>')", "list-libraries", "install-libraries", "list-profiles", "list-overlays"],
+    "cli_actions_with_no_gui_control": ["edit-model (bypassed)", "edit-overlay", "edit-profile", "edit-global-config (bypassed)", "edit-prompt", "test-connect"],
+    "global_flags_exposed": 4,
+    "global_flags_total": 16,
+    "global_flags_missing": ["-s/--scale", "--scale-x/--sx", "--scale-y/--sy", "--scale-z/--sz", "-a/--angle", "-i/--interactive", "-c/--copies", "--colorscheme", "--image-size", "--debug", "-h/--help (via help action only)", "--version (via version action only)"],
+    "config_keys_editable_in_gui": 0,
+    "config_keys_total": 35,
+    "input_file_mode_supported": false,
+    "chaining_supported": "only two hardcoded chains, both with invalid syntax",
+    "stdin_interaction_supported": false
+  },
+
+  "defects_found": [
+    {"id": "D1", "severity": "blocker", "text": "7 commands emit syntax that 3dm rejects (build --slice, build --orient --slice, images, new <name>, libraries --list, libraries --install, profiles, overlays). These cannot have worked against current 3dm."},
+    {"id": "D2", "severity": "high", "text": "Actions are modeled as ad-hoc subcommand strings, not derived from 3dm's verb/flag model, so drift is guaranteed."},
+    {"id": "D3", "severity": "high", "text": "No stdin passthrough: setup, edit-overlay prompts, info -i, self-update confirmations cannot work."},
+    {"id": "D4", "severity": "medium", "text": "edit-* actions bypassed with direct file opens, so edit_in_background/editor config and template/creation logic of 3dm are skipped."},
+    {"id": "D5", "severity": "medium", "text": "Output parsing for post-run behaviour (open STL/SVG/images) is heuristic ('detected from output'); should use deterministic build/ paths."}
+  ]
+}

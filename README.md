@@ -76,27 +76,34 @@ uv run --group docs mkdocs build --strict
 
 ### 3DMake Command Support
 
-The GUI exposes direct buttons and settings for these workflows:
+Every 3dm action and global flag is reachable from the GUI, and every control runs the
+**real `3dm` binary with an argument list (no shell)**. The exact command is echoed in the
+Output Log. Commands that read from stdin or launch an editor open in a system terminal.
 
-- `3dm info`
-- `3dm build`
-- `3dm slice`
-- `3dm orient`
-- `3dm preview`
-- `3dm new`
-- `3dm build slice`
-- `3dm build orient slice`
-- `3dm print`
-- `3dm image`
-- `3dm setup`
-- `3dm list-libraries`
-- `3dm install-libraries`
-- `3dm list-profiles`
-- `3dm list-overlays`
-- `3dm version`
-- `3dm self-update`
-- `3dm help`
-- arbitrary custom commands through the command box
+All 25 actions: `setup`, `new`, `build`, `orient`, `info`, `image`, `preview`, `slice`, `print`,
+`list-profiles`, `list-overlays`, `edit-model`, `edit-overlay`, `edit-profile`, `clone-profile`,
+`edit-profile-gcode`, `edit-prompt`, `edit-global-config`, `list-libraries`, `install-libraries`,
+`test-connect`, `install-profile`, `self-update`, `help`, `version`; plus chains such as
+`build slice` and `build orient slice`, and a validated custom-command box.
+
+All global flags: `-s/--scale`, `--scale-x/y/z`, `-m`, `-v` (silhouettes or preview-plane names),
+`-p`, `-o` (repeatable), `-a` (repeatable), `-i`, `-c`, `--colorscheme`, `--image-size`, `--debug`.
+
+See [docs/cli-equivalents.md](docs/cli-equivalents.md) for the control for each action and flag.
+
+The command spec (`src/tdmake_gui_wrapper/data/3dm_spec.json`) is generated from the 3dmake
+source, so the GUI cannot drift from the CLI:
+
+```bash
+python scripts/sync_spec.py /path/to/3dmake          # regenerate
+python scripts/sync_spec.py /path/to/3dmake --check  # CI drift check
+```
+
+Run the end-to-end tests against a real 3dm:
+
+```bash
+THREEDM_E2E_BIN=/path/to/3dm THREEDM_E2E_SRC=/path/to/3dmake pytest
+```
 
 ### Command Options Panel
 

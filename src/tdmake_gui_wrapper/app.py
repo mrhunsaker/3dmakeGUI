@@ -32,6 +32,7 @@ import html
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 from time import perf_counter
 import tomllib
@@ -39,6 +40,16 @@ import tomllib
 from nicegui import app, ui
 
 from . import __version__
+from .cli import (
+    CliError,
+    Options,
+    build_argv,
+    format_command,
+    needs_terminal,
+    parse_custom_command,
+    tokens_need_terminal,
+    with_binary,
+)
 from .core import (
     find_3dm_binary,
     get_3dmake_config_dir,
@@ -177,7 +188,7 @@ def _open_text_output_dialog(
 
 
 async def _stream_command(
-    cmd: str,
+    cmd: str | list[str],
     output_log: ui.log,
     cwd: str | None = None,
     post_run=None,
@@ -209,12 +220,13 @@ async def _stream_command(
         Optional dialog host container for slot-context safe rendering.
     """
     started_at = perf_counter()
-    _log(output_log, f"[RUN] {cmd}")
+    cmd_text = cmd if isinstance(cmd, str) else format_command(cmd)
+    _log(output_log, f"[RUN] {cmd_text}")
     saw_error = False
     final_rc = "?"
     popup_lines: list[str] = []
     if show_popup:
-        popup_lines.append(f"[RUN] {cmd}")
+        popup_lines.append(f"[RUN] {cmd_text}")
 
     async for line in run_command_async(cmd, cwd=cwd):
         if line.startswith("[done]"):
@@ -244,7 +256,7 @@ async def _stream_command(
         _open_text_output_dialog(
             popup_title or "3dm Command Output",
             "\n".join(popup_lines).strip(),
-            status_line=f"Command: {cmd} | Exit: {final_rc} | Duration: {elapsed:.2f}s",
+            status_line=f"Command: {cmd_text} | Exit: {final_rc} | Duration: {elapsed:.2f}s",
             trigger_button=trigger_button,
             ui_container=ui_container,
             output_dialog_counter_ref=output_dialog_counter_ref,
@@ -625,31 +637,73 @@ def _find_project_root(path_value: str) -> Path | None:
     return None
 
 
-def _ensure_project_layout(project_root: Path, project_name: str) -> None:
-    """Create required project folders and baseline configuration files.
+def _repair_legacy_project_toml(cfg: Path) -> bool:
+    """Rewrite a ``3dmake.toml`` that older GUI versions generated incorrectly.
+
+    Earlier releases wrote ``[project]\nname = "..."``. 3dm treats every top-level
+    key as a setting and ``project`` is not one, so *every* 3dm command in such a
+    project crashed with ``TypeError ... unexpected keyword argument 'project'``.
+
+    Returns
+    -------
+    bool
+        ``True`` if the file was rewritten.
+    """
+    if not cfg.is_file():
+        return False
+    try:
+        data = tomllib.loads(cfg.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    project = data.get("project")
+    if set(data) == {"project"} and isinstance(project, dict) and set(project) <= {"name"}:
+        cfg.write_text("strict_warnings = true\n", encoding="utf-8")
+        return True
+    return False
+
+
+def _ensure_project_layout(project_root: Path, project_name: str | None = None) -> None:  # noqa: ARG001
+    """Make ``project_root`` a valid 3dmake project.
+
+    The real ``3dm new`` is used whenever 3dm is available (its directory prompt is
+    answered through stdin), so the scaffold is exactly what 3dm produces. If 3dm
+    cannot be run, the identical layout is written directly (same files and the
+    same ``strict_warnings = true`` content that ``3dm new`` writes).
 
     Parameters
     ----------
     project_root : pathlib.Path
         Directory where project layout should exist.
     project_name : str
-        Name written into a newly created ``3dmake.toml`` file.
+        Unused for the file content (3dm derives the name from the folder); kept
+        for call-site compatibility.
     """
+    cfg = project_root / "3dmake.toml"
+    _repair_legacy_project_toml(cfg)
+
+    if not cfg.exists():
+        binary = find_3dm_binary()
+        if binary:
+            try:
+                project_root.parent.mkdir(parents=True, exist_ok=True)
+                result = subprocess.run(
+                    [binary, "new"],
+                    input=f"{project_root.name}\n",
+                    cwd=project_root.parent,
+                    text=True,
+                    capture_output=True,
+                    timeout=60,
+                    check=False,
+                )
+                if result.returncode == 0 and cfg.exists():
+                    return
+            except (OSError, subprocess.SubprocessError):
+                pass  # fall through to the identical manual layout
+
     (project_root / "src").mkdir(parents=True, exist_ok=True)
     (project_root / "build").mkdir(parents=True, exist_ok=True)
-
-    cfg = project_root / "3dmake.toml"
     if not cfg.exists():
-        cfg.write_text(
-            "\n".join(
-                [
-                    "[project]",
-                    f'name = "{project_name}"',
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
+        cfg.write_text("strict_warnings = true\n", encoding="utf-8")
 
 
 def _normalize_scad_filename(name: str) -> str:
@@ -795,6 +849,19 @@ def index() -> None:
     ]
     _log_ref: list = [None]
     _popup_host_ref: list = [None]
+    # Image-export widgets double as info's -a/--colorscheme/--image-size when enabled
+    _info_uses_image_opts: list[bool] = [False]
+    _image_opts_getter: list = [None]
+
+    def _run_in_terminal(argv: list[str], cwd: str | None = None) -> None:
+        """Run an interactive 3dm command in a real terminal (stdin/tty available)."""
+        text = format_command(argv)
+        if launch_in_terminal(argv, cwd=cwd):
+            if _log_ref[0] is not None:
+                _log(_log_ref[0], f"[TERMINAL] {text}")
+            _notify("Opened in system terminal. This command needs keyboard input.", toast_type="positive")
+        else:
+            _notify(f"No supported terminal emulator found. Run manually: {text}", type="warning")
     # font radio buttons wired after the drawer is built
     _font_radio: list = [None]
 
@@ -1298,6 +1365,8 @@ def index() -> None:
                             ],
                             value="3sil",
                             label="View (-v)",
+                            with_input=True,
+                            new_value_mode="add-unique",
                         )
                         .classes("w-full")
                         .props('aria-label="View option: -v"')
@@ -1325,6 +1394,9 @@ def index() -> None:
                         .props('aria-label="Scale option: -s"')
                         .tooltip("Scale model with -s")
                     )
+                    _opt_scale_x = ui.input(label="Scale X (--scale-x, e.g. 1.5 or 150%)", value="").classes("w-full")
+                    _opt_scale_y = ui.input(label="Scale Y (--scale-y)", value="").classes("w-full")
+                    _opt_scale_z = ui.input(label="Scale Z (--scale-z)", value="").classes("w-full")
                     _opt_copies = (
                         ui.number(label="Copies (-c)", value=1, step=1)
                         .classes("w-full")
@@ -1342,34 +1414,22 @@ def index() -> None:
                         .tooltip("Enable interactive mode for info with -i")
                     )
 
-                    def _build_flags() -> str:
-                        parts: list[str] = []
-                        model = (_opt_model.value or "").strip()
-                        view = (_opt_view.value or "").strip()
-                        profile = (_opt_profile.value or "").strip()
-                        overlays_raw = (_opt_overlay.value or "").strip()
+                    def _collect_options() -> Options:
+                        """Translate the option widgets into a validated 3dm Options object."""
                         scale_val = float(_opt_scale.value or 1.0)
-                        copies_val = int(_opt_copies.value or 1)
-
-                        if model:
-                            parts.extend(["-m", model])
-                        if view:
-                            parts.extend(["-v", view])
-                        if profile:
-                            parts.extend(["-p", profile])
-                        if overlays_raw:
-                            for ov in [o.strip() for o in overlays_raw.split(",") if o.strip()]:
-                                parts.extend(["-o", ov])
-                        if abs(scale_val - 1.0) > 1e-9:
-                            parts.extend(["-s", str(scale_val)])
-                        if copies_val != 1:
-                            parts.extend(["-c", str(copies_val)])
-                        if _opt_debug.value:
-                            parts.append("--debug")
-                        if _opt_interactive.value:
-                            parts.append("-i")
-
-                        return " ".join(parts)
+                        return Options(
+                            model=_opt_model.value,
+                            view=_opt_view.value,
+                            profile=_opt_profile.value,
+                            overlays=[o.strip() for o in (_opt_overlay.value or "").split(",") if o.strip()],
+                            scale=None if abs(scale_val - 1.0) <= 1e-9 else str(scale_val),
+                            scale_x=_opt_scale_x.value,
+                            scale_y=_opt_scale_y.value,
+                            scale_z=_opt_scale_z.value,
+                            copies=int(_opt_copies.value or 1),
+                            interactive=bool(_opt_interactive.value),
+                            debug=bool(_opt_debug.value),
+                        )
 
             # 2. Quick Actions ─────────────────────────────────────────────────
             with ui.card().classes("w-full").props('id="section-quick" aria-label="Quick actions" role="region"'):
@@ -1517,16 +1577,25 @@ def index() -> None:
                                     )
                                     return
 
-                                cmd = tpl
-                                if "{file}" in tpl:
-                                    cmd = cmd.replace("{file}", f'"{path}"')
+                                verbs = [t for t in tpl.split()[1:] if t != "{file}"]
+                                infile = path if "{file}" in tpl else None
+                                opts = Options() if label == "New Project" else _collect_options()
+                                if label == "Describe (Info)" and _info_uses_image_opts[0] and _image_opts_getter[0]:
+                                    opts.angles, opts.colorscheme, opts.image_size = _image_opts_getter[0]()
+                                try:
+                                    argv = build_argv(verbs, opts, infile)
+                                except CliError as exc:
+                                    _notify(str(exc), toast_type="warning")
+                                    return
+                                cmd = with_binary(_3dm_path_ref[0], argv)
 
-                                flags = _build_flags().strip()
-                                if flags and label != "New Project":
-                                    cmd = f"{cmd} {flags}".strip()
-
-                                if _3dm_path_ref[0]:
-                                    cmd = cmd.replace("3dm ", f'"{_3dm_path_ref[0]}" ', 1)
+                                if needs_terminal(verbs, opts):
+                                    base = Path(path) if path else None
+                                    base_dir = base if base and base.is_dir() else (base.parent if base else None)
+                                    _run_in_terminal(
+                                        cmd, cwd=str(project_root or base_dir) if (project_root or base_dir) else None
+                                    )
+                                    return
 
                                 if label == "Preview":
                                     model_name = _resolve_model_name(
@@ -1617,6 +1686,20 @@ def index() -> None:
                         "w-full"
                     )
 
+                    _image_opts_getter[0] = lambda: (
+                        list(angle_select.value or []),
+                        colorscheme_select.value,
+                        image_size_input.value,
+                    )
+                    ui.switch(
+                        "Also use these settings for Describe (info)",
+                        value=False,
+                        on_change=lambda e: _info_uses_image_opts.__setitem__(0, bool(e.value)),
+                    ).props(
+                        'aria-label="Pass camera angles, color scheme and image size to 3dm info '
+                        '(-a, --colorscheme, --image-size)"'
+                    )
+
                     async def _run_image_export() -> None:
                         path = (file_input.value or "").strip()
                         if not path:
@@ -1640,13 +1723,20 @@ def index() -> None:
                             _notify("Choose at least one camera angle.", toast_type="warning")
                             return
 
-                        angle_flags = " ".join(f"-a {a}" for a in angles)
-                        cmd = (
-                            f"3dm image {angle_flags} --colorscheme {colorscheme_select.value} "
-                            f'--image-size {image_size_input.value} "{path}"'
-                        )
-                        if _3dm_path_ref[0]:
-                            cmd = cmd.replace("3dm ", f'"{_3dm_path_ref[0]}" ', 1)
+                        try:
+                            argv = build_argv(
+                                ["image"],
+                                Options(
+                                    angles=list(angles),
+                                    colorscheme=colorscheme_select.value,
+                                    image_size=image_size_input.value,
+                                ),
+                                path,
+                            )
+                        except CliError as exc:
+                            _notify(str(exc), toast_type="warning")
+                            return
+                        cmd = with_binary(_3dm_path_ref[0], argv)
 
                         before = set((project_root / "build").glob("*.png"))
                         await _stream_command(
@@ -1696,10 +1786,13 @@ def index() -> None:
             with ui.card().classes("w-full").props('id="section-settings" aria-label="Settings" role="region"'):
                 ui.label("Settings").classes("text-base font-semibold mb-1")
 
-                def _with_binary(cmd: str) -> str:
-                    if _3dm_path_ref[0] and cmd.startswith("3dm "):
-                        return cmd.replace("3dm ", f'"{_3dm_path_ref[0]}" ', 1)
-                    return cmd
+                def _verb_argv(verbs: list[str], options: Options | None = None) -> list[str] | None:
+                    """Validated argv (with binary) for verbs, or None after notifying the user."""
+                    try:
+                        return with_binary(_3dm_path_ref[0], build_argv(verbs, options))
+                    except CliError as exc:
+                        _notify(str(exc), toast_type="warning")
+                        return None
 
                 def _project_root_from_input() -> Path | None:
                     return _find_project_root((file_input.value or "").strip())
@@ -1714,8 +1807,15 @@ def index() -> None:
                             type="warning",
                         )
                         return
+                    verbs = cmd.split()[1:]
+                    argv = _verb_argv(verbs)
+                    if argv is None:
+                        return
+                    if needs_terminal(verbs):
+                        _run_in_terminal(argv, cwd=str(project_root) if project_root else None)
+                        return
                     await _stream_command(
-                        _with_binary(cmd),
+                        argv,
                         _log_ref[0],
                         cwd=str(project_root) if project_root else None,
                         show_popup=True,
@@ -1724,15 +1824,11 @@ def index() -> None:
                         output_dialog_counter_ref=_output_dialog_counter_ref,
                     )
 
-                def _launch_in_terminal_ui(cmd: str) -> None:
-                    launched = launch_in_terminal(_with_binary(cmd))
-                    if launched:
-                        _notify("Opened command in system terminal.", toast_type="positive")
-                    else:
-                        _notify(
-                            "No supported terminal emulator found. Run the command manually.",
-                            type="warning",
-                        )
+                def _launch_in_terminal_ui(cmd: str, options: Options | None = None) -> None:
+                    argv = _verb_argv(cmd.split()[1:], options)
+                    if argv is not None:
+                        pr = _project_root_from_input()
+                        _run_in_terminal(argv, cwd=str(pr) if pr else None)
 
                 setup_btn_ref: list[ui.button | None] = [None]
 
@@ -1947,16 +2043,7 @@ def index() -> None:
                             if not value:
                                 _notify("Enter an overlay name first.", toast_type="warning")
                                 return
-                            config_dir = get_3dmake_config_dir()
-                            overlay_dir = config_dir / "overlays"
-                            target = _resolve_named_file(overlay_dir, value, ".ini")
-                            if not target.exists():
-                                target.parent.mkdir(parents=True, exist_ok=True)
-                                target.write_text(
-                                    "# 3dmake overlay\n# Add slicer override values here.\n",
-                                    encoding="utf-8",
-                                )
-                            _load_text_file_in_editor(target, "overlay")
+                            _launch_in_terminal_ui("3dm edit-overlay", Options(overlays=[value], profile=_opt_profile.value))
                             dlg.close()
 
                         with ui.row().classes("gap-2 mt-2"):
@@ -2029,41 +2116,59 @@ def index() -> None:
                     ui.button("Edit Overlay", on_click=open_edit_overlay_dialog).props(
                         'size=sm aria-label="Edit slicer overlay: runs 3dm edit-overlay"'
                     ).classes("w-full")
-                    ui.button(
-                        "Edit Profile",
-                        on_click=lambda: _load_text_file_in_editor(
-                            _resolve_named_file(
-                                get_3dmake_config_dir() / "profiles",
-                                (_opt_profile.value or "").strip() or "default",
-                                ".ini",
-                            ),
-                            "profile",
-                            create_if_missing=True,
-                            default_content="# 3dmake printer profile\n",
-                        ),
-                    ).props('size=sm aria-label="Edit printer profile: runs 3dm edit-profile"').classes("w-full")
-                    ui.button(
-                        "Edit AI Prompt",
-                        on_click=lambda: _load_text_file_in_editor(
-                            next(
-                                (
-                                    p
-                                    for p in [
-                                        get_3dmake_config_dir() / "prompt.txt",
-                                        get_3dmake_config_dir() / "ai_prompt.txt",
-                                        get_3dmake_config_dir() / "ai-prompt.txt",
-                                        get_3dmake_config_dir() / "prompts" / "describe_prompt.txt",
-                                        get_3dmake_config_dir() / "prompts" / "prompt.txt",
-                                    ]
-                                    if p.exists()
-                                ),
-                                get_3dmake_config_dir() / "prompt.txt",
-                            ),
-                            "AI prompt",
-                            create_if_missing=True,
-                            default_content="# 3dmake AI description prompt\n",
-                        ),
-                    ).props('size=sm aria-label="Edit AI description prompt: runs 3dm edit-prompt"').classes("w-full")
+                    def _term_btn(label: str, cmd: str, tip: str, needs_proj: bool = False, with_profile: bool = False,
+                                  with_model: bool = False):
+                        def _click() -> None:
+                            if needs_proj and _project_root_from_input() is None:
+                                _notify("No 3dmake project found at that path. Run 3dm new first.", type="warning")
+                                return
+                            opts = Options(
+                                profile=_opt_profile.value if with_profile else None,
+                                model=_opt_model.value if with_model else None,
+                            )
+                            _launch_in_terminal_ui(cmd, opts)
+
+                        ui.button(label, on_click=_click).tooltip(tip).props(
+                            f'size=sm aria-label="{label}: runs {cmd} in a terminal"'
+                        ).classes("w-full")
+
+                    _term_btn("Edit Profile", "3dm edit-profile", "Open the selected printer profile (-p) via 3dm",
+                              with_profile=True)
+                    _term_btn("Edit AI Prompt", "3dm edit-prompt", "Edit the AI prompt used by 3dm info")
+                    _term_btn("Edit Model (3dm)", "3dm edit-model", "Open the model SCAD file (-m) via 3dm",
+                              needs_proj=True, with_model=True)
+                    _term_btn("Edit Global Config (3dm)", "3dm edit-global-config", "Edit defaults.toml via 3dm")
+                    _term_btn("Clone Profile", "3dm clone-profile", "Clone a printer profile under a new name",
+                              with_profile=True)
+                    _term_btn("Edit Profile GCODE", "3dm edit-profile-gcode", "Edit GCODE scripts in a printer profile",
+                              with_profile=True)
+                    ui.button("Test Connection", on_click=_settings_click("3dm test-connect")).tooltip(
+                        "Test the connection to the configured printer (OctoPrint / Bambu)"
+                    ).props('size=sm aria-label="Test printer connection: runs 3dm test-connect"').classes("w-full")
+
+                    def open_install_profile_dialog() -> None:
+                        with ui.dialog() as dlg, ui.card().classes("w-[28rem]"):
+                            ui.label("Install printer profile").classes("text-base font-semibold")
+                            ini_path = ui.input(label="Path to profile .ini file").classes("w-full")
+
+                            def _install() -> None:
+                                value = (ini_path.value or "").strip()
+                                try:
+                                    argv = with_binary(_3dm_path_ref[0], build_argv(["install-profile"], None, value))
+                                except CliError as exc:
+                                    _notify(str(exc), toast_type="warning")
+                                    return
+                                _run_in_terminal(argv)
+                                dlg.close()
+
+                            with ui.row().classes("gap-2 mt-2"):
+                                ui.button("Install", on_click=_install).props("color=primary size=sm")
+                                ui.button("Cancel", on_click=dlg.close).props("flat size=sm")
+                        dlg.open()
+
+                    ui.button("Install Profile", on_click=open_install_profile_dialog).tooltip(
+                        "Install a printer profile .ini file via 3dm"
+                    ).props('size=sm aria-label="Install profile: runs 3dm install-profile"').classes("w-full")
 
                 def _read_defaults_values() -> dict[str, object]:
                     cfg = get_3dmake_defaults_toml_path()
@@ -3247,7 +3352,7 @@ def index() -> None:
                 with ui.row().classes("w-full gap-2 items-end cmd-row"):
                     command_input = ui.input(
                         label="3dm command",
-                        placeholder="3dm new  |  3dm setup  |  3dm lib install some-lib",
+                        placeholder="3dm list-profiles  |  3dm build slice -p prusa_MK4  (no shell: arguments are validated)",
                     ).classes("flex-1 text-sm cmd-input")
 
                     async def execute_custom():
@@ -3255,12 +3360,18 @@ def index() -> None:
                         if not cmd:
                             _notify("Enter a command first.", toast_type="warning")
                             return
-                        if _3dm_path_ref[0] and cmd.startswith("3dm "):
-                            cmd = cmd.replace("3dm ", f'"{_3dm_path_ref[0]}" ', 1)
+                        try:
+                            argv = parse_custom_command(cmd, _3dm_path_ref[0])
+                        except CliError as exc:
+                            _notify(str(exc), toast_type="warning")
+                            return
                         if _log_ref[0] is None:
                             return
+                        if tokens_need_terminal(argv[1:]):
+                            _run_in_terminal(argv)
+                            return
                         await _stream_command(
-                            cmd,
+                            argv,
                             _log_ref[0],
                             show_popup=True,
                             popup_title="Custom Command Output",

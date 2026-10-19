@@ -1,0 +1,224 @@
+{
+  "meta": {
+    "title": "Remediation plan: 100% 3dm CLI parity in 3dmakeGUI with direct CLI execution",
+    "inputs": ["3dmake_functions.json", "3dmake_gui_functions.json"],
+    "target": "mrhunsaker/3dmakeGUI (assumed TypeScript VS Code extension in vscode-extension/; adapt paths if other front-ends exist)",
+    "non_negotiable_requirement": "Every GUI control executes the real `3dm` binary with a real argv. The GUI never reimplements 3dm behaviour (no direct file opens in place of edit-*, no JS re-implementation of slicing/orient/preview, no output scraping where a deterministic path exists).",
+    "definition_of_done": "Every entry in 3dmake_functions.json (actions, global_options, config_keys, input-file mode, interactive prompts) has a reachable GUI control, an automated test asserting the exact argv, and appears in the generated coverage report with zero gaps."
+  },
+
+  "design_principles": [
+    "Single source of truth: 3dmake_functions.json (checked into the repo as spec/3dm_spec.json) drives argv construction, command-palette registration, menus, and tests. Adding a flag means editing JSON, not code.",
+    "No shell: spawn(binary, argvArray, {shell:false}). Never string-concatenate commands. Quote-safe on Windows paths.",
+    "Show-what-runs: before and after every run, display the exact command line (copyable) in the Output channel, and expose a 'Copy as CLI command' action. This makes the GUI verifiably non-approximate.",
+    "Chains are built as positional verbs in any order (3dm sorts them); the GUI offers a verb multi-select instead of hardcoded pipelines.",
+    "Interactive actions run in a real terminal (VS Code Pseudoterminal/Terminal API with node-pty or vscode.window.createTerminal + sendText-free ExecutionTask) so stdin prompts work; non-interactive actions stream to the Output channel for screen-reader aria-live.",
+    "Accessibility is preserved: every new control carries accessibilityInformation; completion toasts and aria-live regions remain."
+  ],
+
+  "work_items": [
+    {
+      "id": "WI-00", "title": "Ground truth sync (regenerate spec from the real CLI)", "priority": 0,
+      "steps": [
+        "Add scripts/sync_spec.ts that runs `3dm help` and parses the action list/docstrings, and runs `3dm <verb> --help`-equivalents where available; diff against spec/3dm_spec.json and fail CI on drift.",
+        "Read tdeck/3dmake actions/__init__.py once (git clone, not web) to fill every 'verify'/'likely'/'inferred' field in spec: isolated, last_in_chain, implied_actions, input_file_types, internal vs user verbs, ALL_ACTIONS_IN_ORDER.",
+        "Scan all of 3dmakeGUI (not just vscode-extension/) and append any other front-ends or commands to 3dmake_gui_functions.json."
+      ],
+      "acceptance": ["spec has no 'verify' strings", "CI job `spec-drift` passes against pinned 3dm version and against latest release"]
+    },
+    {
+      "id": "WI-01", "title": "Core: CLI runner and argv builder (the only place 3dm is invoked)", "priority": 1,
+      "files": ["src/core/spec.ts", "src/core/argv.ts", "src/core/runner.ts", "src/core/binary.ts"],
+      "design": {
+        "ThreeDmRequest": {
+          "actions": "string[] (verbs, validated against spec; order irrelevant)",
+          "globalOptions": "typed map keyed by spec.global_options[].id; repeatable options are arrays",
+          "inputFile": "optional absolute path; enforces: <=1, extension in union of accepted types of chosen actions, mutually exclusive with `model`",
+          "cwd": "project directory (or directory for `new`)",
+          "env": "optional overrides e.g. THREEDMAKE_CONFIG_DIR",
+          "mode": "'stream' | 'terminal'"
+        },
+        "buildArgv(req)": "Emits [ ...flagPairs, ...actions, inputFile? ]. Flags use their canonical long form from spec. Repeatables expand as `-o a -o b`. Validates: scale XOR per-axis, view enum or plane pattern, image-size WxH, copies>=1, colorscheme enum, angle enum, percent syntax. Dashed tokens must come from spec only (guards against D1-type bugs).",
+        "validateChain(req)": "Rejects isolated actions combined with others (setup, help, version, self-update, plus whatever WI-00 finds), and actions after last_in_chain per internal order, mirroring 3dm.py messages.",
+        "runner": "spawn with shell:false, cwd, env; streams stdout/stderr; returns {argv, exitCode, durationMs, outputs[]}; exit code 2 = user cancelled; supports cancel (SIGINT, then SIGTERM after 3s); captures --debug traces.",
+        "binary resolution": "keep 3dmake.binaryPath / THREE_DM_PATH / THREEDM_PATH / PATH; additionally support `python 3dm.py` launcher via setting 3dmake.launcher = ['uv','run','python','/path/3dm.py']",
+        "outputs discovery": "After success, compute deterministic expected outputs from spec (build/<model>.stl, -oriented.stl, <project>-<model>.gcode, <stem>-<view>.svg/.stl, <model>-<angle>.png) and stat them; fall back to a before/after directory diff of build/. Do not rely on regex over stdout."
+      },
+      "acceptance": ["argv unit tests (WI-12) cover every spec entry", "no other file in repo imports child_process"]
+    },
+    {
+      "id": "WI-02", "title": "Fix the 8 broken commands (immediate, ships first)", "priority": 1,
+      "mapping": [
+        {"gui": "Build + Slice", "old": "3dm build --slice", "new_argv": ["build", "slice"]},
+        {"gui": "Full Pipeline", "old": "3dm build --orient --slice", "new_argv": ["build", "orient", "slice"]},
+        {"gui": "Export Images", "old": "3dm images", "new_argv": ["image"]},
+        {"gui": "New Project", "old": "3dm new <name>", "new_argv": ["new"], "note": "Prompt for a folder name in the GUI, mkdir it, then spawn with cwd = that folder. Folder creation is GUI chrome, project scaffolding is 3dm's."},
+        {"gui": "List Libraries", "old": "3dm libraries --list", "new_argv": ["list-libraries"]},
+        {"gui": "Install Libraries", "old": "3dm libraries --install", "new_argv": ["install-libraries"]},
+        {"gui": "List Profiles", "old": "3dm profiles", "new_argv": ["list-profiles"]},
+        {"gui": "List Overlays", "old": "3dm overlays", "new_argv": ["list-overlays"]}
+      ],
+      "acceptance": ["Each runs against real 3dm without 'Unknown action'/'Unknown option(s)'", "e2e tests WI-12 pass"]
+    },
+    {
+      "id": "WI-03", "title": "Universal options panel covering all 16 global flags", "priority": 2,
+      "ui": "Replace the 4-item Command Options tree with a form-like tree/QuickPick flow grouped by: Model & input (-m, input file), Scale (-s | --sx/--sy/--sz with mutual exclusion), Printing (-p picker populated from `3dm list-profiles`, -o multi-select populated from `3dm list-overlays`, -c), Preview (-v: silhouette enum + plane names discovered from build output/build metadata), Images/AI (-a multi-select of 11 angles, --image-size with presets 640x480/1080x720/1920x1080/custom, --colorscheme enum, -i), Diagnostics (--debug).",
+      "behaviour": [
+        "Each option shows 'unset (config default)' vs explicit; only explicit values become argv flags.",
+        "Options not applicable to the selected action are greyed with reason (from spec applies_to) but remain settable.",
+        "Pickers for -p/-o call the real list-* actions (cached per session, refresh button).",
+        "Session options persist per-project in workspaceState; a 'Reset options' command clears them."
+      ],
+      "acceptance": ["All 16 flags settable", "argv preview matches settings"]
+    },
+    {
+      "id": "WI-04", "title": "Action runner UI: all 22 actions + chain composer", "priority": 2,
+      "ui": [
+        "Generate one command `3dmake.run.<action>` per spec action (package.json contributes generated by scripts/gen_contributions.ts at build time).",
+        "Quick Actions tree grouped by spec category: Pipeline (build, orient, preview, slice, print), Inspect (info, image), Printer (test-connect), Libraries (list-libraries, install-libraries), Config (list-profiles, list-overlays), Edit (edit-model, edit-overlay, edit-profile, edit-global-config, edit-prompt), Project (new, setup), Maintenance (self-update, version, help).",
+        "'Compose chain...' command: multi-select verbs -> shows implied actions and final internal order (computed from spec) -> shows exact argv -> Run.",
+        "Keep 'Run Custom Command' as escape hatch, but route it through the same runner/validator with a warning (not error) on unknown tokens."
+      ],
+      "acceptance": ["tests enumerate spec.actions and assert a registered command for each", "chain composer rejects isolated+other and post-last_in_chain combos with 3dm's wording"]
+    },
+    {
+      "id": "WI-05", "title": "Input-file (non-project) mode", "priority": 2,
+      "ui": "Command `Run on file...` and Explorer context menu on .scad/.stl/.gcode: choose actions allowed for that extension (from spec input_file_types), run with cwd = file's folder (3dm copies outputs to cwd and prints 'Result is in ...'), then reveal result files.",
+      "rules": ["Disable `-m` when an input file is chosen (mirrors 3dm.py error).", ".gcode accepted only by actions that list it (print)."],
+      "acceptance": ["`3dm slice turtle.stl` and `3dm build orient print pyramid.stl` reproducible from GUI with identical argv"]
+    },
+    {
+      "id": "WI-06", "title": "Interactive actions via real terminal / pty", "priority": 2,
+      "applies_to": ["setup", "new (if it prompts)", "edit-overlay (printer-specific prompt)", "info -i", "self-update", "any first-run 'set up now?' prompt"],
+      "design": [
+        "RunMode 'terminal': create a vscode Pseudoterminal backed by node-pty (fallback: Terminal with shellPath=binary and shellArgs=argv) so the user answers prompts directly; argv shown first.",
+        "Spec flag interactive_stdin drives mode selection; unknown/'with -i' resolved at request time.",
+        "Output of terminal runs is also copied to the Output channel when feasible for screen-reader users; otherwise announce via status message 'Interactive 3dm session started in terminal'.",
+        "Detect the 'set them up now?' first-run prompt: if exit/stdout matches, offer to rerun `setup` in terminal mode."
+      ],
+      "acceptance": ["Setup completes end-to-end from GUI on a clean config dir (test with THREEDMAKE_CONFIG_DIR temp dir)", "info -i accepts a follow-up question"]
+    },
+    {
+      "id": "WI-07", "title": "Edit actions execute the real edit-* verbs", "priority": 2,
+      "design": [
+        "Replace direct-open of scad/defaults.toml with spawn of `3dm edit-model [-m]`, `edit-global-config`, `edit-profile -p`, `edit-overlay -o [-p]`, `edit-prompt`.",
+        "Editor handling: 3dm launches the user's configured `editor`. If `editor` is unset, the GUI offers to set it to `code --wait`-style or `code` (writes via a settings form WI-08, not silently) and sets edit_in_background appropriately (false for terminal editors, true for GUI editors; per README footnote 3).",
+        "Edit actions are 'detached': GUI does not block on the editor; it re-scans project on window focus.",
+        "edit-overlay prompts (create new? printer-specific?) run in terminal mode (WI-06).",
+        "`Open Project Config (3dmake.toml)` remains a GUI file open (no CLI equivalent exists) and is labelled as such."
+      ],
+      "acceptance": ["Spying on spawn shows argv for each edit verb", "creating a new overlay via GUI produces the .ini under the correct overlays/ path"]
+    },
+    {
+      "id": "WI-08", "title": "Configuration editor for all 35 config keys (defaults.toml and 3dmake.toml)", "priority": 3,
+      "design": [
+        "Settings webview/tree generated from spec.config_keys with types, defaults, enums, validation, secret masking (octoprint_key, bambu_access_code, gemini_key, openrouter_key, openai_api_key).",
+        "Scope switch: Global (defaults.toml, path from `3dm version`) vs Project (3dmake.toml in project or parent dir, mirroring 3dm discovery).",
+        "Write with a comment-preserving TOML library (e.g. @iarna/toml cannot preserve comments; use `smol-toml` + targeted text patching or `taplo` WASM) so hand-edited files are not mangled; always back up to .bak before write.",
+        "Show effective value and its origin (global/project/CLI) using the same cascade as 3dm.py: defaults.toml < 3dmake.toml < CLI.",
+        "List-typed keys (libraries, local_libraries, overlays, image_angles) get add/remove UIs; libraries picker fed by `3dm list-libraries`, with 'Install now' chained to `install-libraries`.",
+        "Include min_3dmake_version, print_mode conditional sections (octoprint_* / bambu_*), and a 'Test connection' button that runs `3dm test-connect`."
+      ],
+      "acceptance": ["Round-trip test: edit every key, re-run `3dm` with --debug and confirm values loaded", "Secrets never logged to Output channel (argv never contains secrets; config values are file-only)"]
+    },
+    {
+      "id": "WI-09", "title": "Per-action UX specifics (everything not covered above)", "priority": 3,
+      "items": [
+        {"action": "slice", "detail": "Parse and present filament length/weight and extrusion-type breakdown as a structured summary but keep raw output visible. Chain-aware: choose profile/overlays/copies in a single dialog."},
+        {"action": "print", "detail": "Confirmation dialog showing print_mode, host (masked), auto_start_prints; offers 'Run test-connect first'."},
+        {"action": "test-connect", "detail": "New first-class command plus button in the printer settings group."},
+        {"action": "preview", "detail": "View picker = 6 silhouettes + plane names. Plane discovery: run `build` and read preview_plane_names via the build output contract (WI-00 determines the stable source); cache by scad mtime. Open resulting SVG/STL."},
+        {"action": "image", "detail": "Multi-select angles, size, colorscheme; open resulting PNGs in an accessible gallery with alt text '<model> viewed from <angle>'."},
+        {"action": "info", "detail": "Checkbox 'interactive' -> terminal mode; non-interactive streams to Output."},
+        {"action": "orient", "detail": "Open build/<model>-oriented.stl in the STL viewer."},
+        {"action": "install-libraries", "detail": "Offer after any change to the libraries list."},
+        {"action": "self-update", "detail": "Terminal mode; after exit, re-resolve binary and show new version via `3dm version`."},
+        {"action": "version", "detail": "Parse config dir from output to power 'Open config folder'."},
+        {"action": "help", "detail": "Show full `3dm help` text in a read-only document for screen readers."},
+        {"action": "new", "detail": "Create folder, run `3dm new` with cwd=folder, then refresh Project view and open src/main.scad via `edit-model`."}
+      ]
+    },
+    {
+      "id": "WI-10", "title": "Viewers and project tree follow deterministic outputs", "priority": 4,
+      "design": ["STL viewer: add ASCII STL parsing (current limitation: binary only) or convert; add -oriented.stl and preview .stl recognition.", "Project view lists build/ outputs by pattern from spec outputs[]; includes .png images and .svg.", "Remove stdout-regex-based 'detect last SVG' logic in favour of runner.outputs."]
+    },
+    {
+      "id": "WI-11", "title": "Version awareness and compatibility", "priority": 4,
+      "design": ["On activation run `3dm version`; parse version; compare with spec.min_supported; warn on older 3dm lacking verbs (e.g. test-connect since v0.8, list-profiles since v0.4).", "Disable controls whose action is absent in `3dm help` output of the installed binary (runtime capability detection) instead of failing.", "Surface 3dm's own update notice from stdout as a notification offering `self-update`."]
+    },
+    {
+      "id": "WI-12", "title": "Test suite proving non-approximation", "priority": 1,
+      "layers": [
+        {"name": "unit", "what": "For each spec action and each global option: buildArgv golden tests; invalid combos (scale+scale_x, model+inputFile, isolated+other, bad enum) rejected with 3dm-equivalent messages.", "tool": "vitest/mocha"},
+        {"name": "contract", "what": "Spawn a fake `3dm` shim that records argv/stdin/cwd; trigger EVERY registered GUI command programmatically via vscode.commands.executeCommand in @vscode/test-electron; assert recorded argv equals expected.", "coverage_gate": "100% of spec.actions and spec.global_options exercised"},
+        {"name": "e2e-real-cli", "what": "In CI install pinned 3dm release (+ OpenSCAD, PrusaSlicer bundled in release) and run: new, edit-model (EDITOR=true), build, orient, preview (each view), slice, image, info (no LLM), list-*, install-libraries, version, help, test-connect (expect graceful failure), build slice via chain composer, input-file mode with test_fixtures from tdeck/3dmake.", "env": "THREEDMAKE_CONFIG_DIR=<tmp>"},
+        {"name": "spec-drift", "what": "WI-00 job fails if `3dm help` actions != spec actions."},
+        {"name": "a11y", "what": "Assert every contributed tree item and command has accessibilityInformation/title."}
+      ]
+    },
+    {
+      "id": "WI-13", "title": "Generated coverage report and docs", "priority": 5,
+      "design": ["scripts/coverage_report.ts emits COVERAGE.md and coverage.json mapping each spec entry -> GUI command id -> test id; CI fails if any row empty.", "Rewrite README command table from spec (fixes mislabels such as 'Describe (Info)' = metadata).", "Add docs/CLI_EQUIVALENTS.md: every GUI control -> exact argv template."]
+    }
+  ],
+
+  "action_to_gui_matrix": [
+    {"action": "setup", "gui": "Settings & Tools > Run Setup", "argv": ["setup"], "mode": "terminal", "wi": "WI-06"},
+    {"action": "new", "gui": "Project > New Project", "argv": ["new"], "cwd": "chosen folder", "mode": "terminal-if-prompts", "wi": "WI-02/WI-09"},
+    {"action": "edit-model", "gui": "Edit > Edit Model", "argv": ["edit-model", "[-m M]"], "mode": "detached", "wi": "WI-07"},
+    {"action": "edit-overlay", "gui": "Edit > Edit Overlay", "argv": ["edit-overlay", "-o NAME", "[-p P]"], "mode": "terminal", "wi": "WI-07"},
+    {"action": "edit-profile", "gui": "Edit > Edit Profile", "argv": ["edit-profile", "-p P"], "mode": "detached", "wi": "WI-07"},
+    {"action": "edit-global-config", "gui": "Edit > Edit Global Config", "argv": ["edit-global-config"], "mode": "detached", "wi": "WI-07"},
+    {"action": "edit-prompt", "gui": "Edit > Edit AI Prompt", "argv": ["edit-prompt"], "mode": "detached", "wi": "WI-07"},
+    {"action": "build", "gui": "Pipeline > Build", "argv": ["build", "[opts]"], "mode": "stream", "wi": "WI-04"},
+    {"action": "orient", "gui": "Pipeline > Orient", "argv": ["orient", "[opts]"], "mode": "stream", "wi": "WI-04"},
+    {"action": "preview", "gui": "Pipeline > Preview", "argv": ["preview", "[-v V]"], "mode": "stream", "wi": "WI-09"},
+    {"action": "slice", "gui": "Pipeline > Slice", "argv": ["slice", "[-p -o -c]"], "mode": "stream", "wi": "WI-09"},
+    {"action": "print", "gui": "Pipeline > Print", "argv": ["print", "[-p -o -c]"], "mode": "stream", "wi": "WI-09"},
+    {"action": "test-connect", "gui": "Printer > Test Connection", "argv": ["test-connect"], "mode": "stream", "wi": "WI-09"},
+    {"action": "info", "gui": "Inspect > Describe Model", "argv": ["info", "[-i] [-a ...] [--image-size] [--colorscheme]"], "mode": "stream|terminal(-i)", "wi": "WI-06/WI-09"},
+    {"action": "image", "gui": "Inspect > Export Images", "argv": ["image", "[-a ...] [--image-size] [--colorscheme]"], "mode": "stream", "wi": "WI-02/WI-09"},
+    {"action": "list-profiles", "gui": "Config > List Profiles", "argv": ["list-profiles"], "mode": "stream+cache", "wi": "WI-02/WI-03"},
+    {"action": "list-overlays", "gui": "Config > List Overlays", "argv": ["list-overlays"], "mode": "stream+cache", "wi": "WI-02/WI-03"},
+    {"action": "list-libraries", "gui": "Libraries > List", "argv": ["list-libraries"], "mode": "stream+cache", "wi": "WI-02/WI-08"},
+    {"action": "install-libraries", "gui": "Libraries > Install", "argv": ["install-libraries"], "mode": "stream", "wi": "WI-02"},
+    {"action": "self-update", "gui": "Settings & Tools > Self-Update", "argv": ["self-update"], "mode": "terminal", "wi": "WI-06"},
+    {"action": "version", "gui": "Settings & Tools > Version", "argv": ["version"], "mode": "stream", "wi": "WI-09/WI-11"},
+    {"action": "help", "gui": "Settings & Tools > Help", "argv": ["help"], "mode": "stream->document", "wi": "WI-09"}
+  ],
+
+  "global_option_to_gui_matrix": [
+    {"flag": "-s/--scale", "gui": "Options > Scale (uniform)", "validation": "float or N%; excludes per-axis"},
+    {"flag": "--scale-x/--sx", "gui": "Options > Scale X"},
+    {"flag": "--scale-y/--sy", "gui": "Options > Scale Y"},
+    {"flag": "--scale-z/--sz", "gui": "Options > Scale Z"},
+    {"flag": "-m/--model", "gui": "Options > Model (picker from src/*.scad)", "validation": "disabled with input file"},
+    {"flag": "-v/--view", "gui": "Options > Preview view"},
+    {"flag": "-p/--profile", "gui": "Options > Profile (picker from list-profiles)"},
+    {"flag": "-o/--overlay", "gui": "Options > Overlays (multi-select from list-overlays)"},
+    {"flag": "-a/--angle", "gui": "Options > Image angles (multi-select, 11 values)"},
+    {"flag": "-i/--interactive", "gui": "Options > Interactive info"},
+    {"flag": "-c/--copies", "gui": "Options > Copies"},
+    {"flag": "--colorscheme", "gui": "Options > Color scheme"},
+    {"flag": "--image-size", "gui": "Options > Image size"},
+    {"flag": "--debug", "gui": "Options > Debug output"},
+    {"flag": "-h/--help", "gui": "Help action"},
+    {"flag": "--version", "gui": "Version action"}
+  ],
+
+  "sequencing": [
+    {"phase": 1, "items": ["WI-00", "WI-01", "WI-02", "WI-12 (unit+contract layers)"], "outcome": "Nothing emits invalid syntax; harness proves it"},
+    {"phase": 2, "items": ["WI-03", "WI-04", "WI-05", "WI-06", "WI-07"], "outcome": "All actions and flags reachable, interactive and edit verbs real"},
+    {"phase": 3, "items": ["WI-08", "WI-09", "WI-10", "WI-11"], "outcome": "Config editor, per-action polish, viewers, compatibility"},
+    {"phase": 4, "items": ["WI-12 (e2e-real-cli, a11y)", "WI-13"], "outcome": "CI-enforced parity"}
+  ],
+
+  "risks_and_open_questions": [
+    "Exact verb/implied/isolated metadata is unconfirmed (see WI-00); do not hardcode it before running the sync.",
+    "node-pty is a native module: packaging per platform/Electron ABI may be painful; fallback is a VS Code Terminal with shellPath/shellArgs, which needs no native code but gives less control.",
+    "Plane-name discovery relies on build stderr `_3dm_log_scalar` lines (CLAUDE.md); confirm whether plain `3dm build` output exposes them to a caller, otherwise parse build output or run OpenSCAD logging per CLAUDE.md.",
+    "Windows quoting and paths with spaces: always argv arrays; test on Windows CI.",
+    "Secrets: config editor writes secrets to files only; never pass them in argv or log them.",
+    "If 3dmakeGUI has non-VS Code front-ends, WI-01 core must be extracted to a shared package first."
+  ]
+}
