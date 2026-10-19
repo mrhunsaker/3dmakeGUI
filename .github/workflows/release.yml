@@ -1,4 +1,8 @@
-name: Build And Release Artifacts
+{
+    "settings": {
+        "workbench.iconTheme": "none"
+    }
+}name: Build And Release Artifacts
 
 on:
   push:
